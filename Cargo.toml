@@ -1,9 +1,23 @@
 [package]
-name        = "tether-map"
-version     = "0.1.0"
-edition     = "2024"
-license     = "MIT OR Apache-2.0"
+name = "tether-map"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "A no-std compatible linked hashmap implementation."
+repository = "https://github.com/Jesterhearts/tether-map"
+categories = [
+    "data-structures",
+    "hashmap",
+    "no-std",
+    "linked-list",
+]
+keywords = [
+    "data-structures",
+    "hashmap",
+    "no-std",
+    "linked-list",
+]
+readme = "README.md"
 
 [lib]
 path = "src/lib.rs"
