@@ -750,44 +750,16 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
             }
         };
 
-        self.finish_removal(ptr, data.key, data.value, prev, next)
-    }
-
-    fn finish_removal(
-        &mut self,
-        ptr: Ptr,
-        key: K,
-        value: T,
-        prev: Ptr,
-        next: Ptr,
-    ) -> Option<RemovedEntry<K, T>> {
-        if self.head == ptr && self.tail == ptr {
-            self.head = Ptr::null();
-            self.tail = Ptr::null();
-            Some(RemovedEntry {
-                key,
-                value,
-                prev: Ptr::null(),
-                next: Ptr::null(),
-            })
-        } else {
-            *self.nodes.links_mut(prev).next_mut() = next;
-            *self.nodes.links_mut(next).prev_mut() = prev;
-
-            if self.tail == ptr {
-                self.tail = prev;
-            }
-            if self.head == ptr {
-                self.head = next;
-            }
-
-            Some(RemovedEntry {
-                key,
-                value,
-                prev,
-                next,
-            })
-        }
+        finish_removal(
+            &mut self.head,
+            &mut self.tail,
+            &mut self.nodes,
+            ptr,
+            data.key,
+            data.value,
+            prev,
+            next,
+        )
     }
 
     /// Returns a reference to the value associated with the given pointer.
@@ -1155,7 +1127,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
             "Tail should link to head"
         );
         assert_eq!(
-            self.len(),
+            self.iter().count(),
             self.table.len(),
             "Links and map should have the same length"
         );
@@ -1193,6 +1165,45 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
                 );
             }
         }
+    }
+}
+
+fn finish_removal<K, T>(
+    head: &mut Ptr,
+    tail: &mut Ptr,
+    nodes: &mut Arena<K, T>,
+    ptr: Ptr,
+    key: K,
+    value: T,
+    prev: Ptr,
+    next: Ptr,
+) -> Option<RemovedEntry<K, T>> {
+    if *head == ptr && *tail == ptr {
+        *head = Ptr::null();
+        *tail = Ptr::null();
+        Some(RemovedEntry {
+            key,
+            value,
+            prev: Ptr::null(),
+            next: Ptr::null(),
+        })
+    } else {
+        *nodes.links_mut(prev).next_mut() = next;
+        *nodes.links_mut(next).prev_mut() = prev;
+
+        if *tail == ptr {
+            *tail = prev;
+        }
+        if *head == ptr {
+            *head = next;
+        }
+
+        Some(RemovedEntry {
+            key,
+            value,
+            prev,
+            next,
+        })
     }
 }
 
@@ -1657,6 +1668,8 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
             hash_table::Entry::Occupied(entry) => Entry::Occupied(OccupiedEntry {
                 node: *entry.get(),
                 arena: &mut self.nodes,
+                head: &mut self.head,
+                tail: &mut self.tail,
                 entry,
             }),
             hash_table::Entry::Vacant(entry) => Entry::Vacant(VacantEntry {
@@ -1727,8 +1740,18 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
                 } = slot.into_data();
 
                 occupied.remove();
-                self.finish_removal(ptr, key, value, prev, next)
-                    .map(|entry| (ptr, entry))
+
+                finish_removal(
+                    &mut self.head,
+                    &mut self.tail,
+                    &mut self.nodes,
+                    ptr,
+                    key,
+                    value,
+                    prev,
+                    next,
+                )
+                .map(|entry| (ptr, entry))
             }
             Err(_) => None,
         }
@@ -2293,6 +2316,8 @@ pub struct OccupiedEntry<'a, K, V> {
     entry: hash_table::OccupiedEntry<'a, Ptr>,
     node: Ptr,
     arena: &'a mut Arena<K, V>,
+    head: &'a mut Ptr,
+    tail: &'a mut Ptr,
 }
 
 impl<K, V> OccupiedEntry<'_, K, V> {
@@ -2512,9 +2537,17 @@ impl<K, V> OccupiedEntry<'_, K, V> {
     /// assert_eq!(map.len(), 0);
     /// ```
     pub fn remove_entry(self) -> (K, V) {
-        let data = self.arena.free(self.node).into_data();
+        let data = self.arena.free(self.node);
+        let next = data.next();
+        let LLData {
+            prev, key, value, ..
+        } = data.into_data();
         self.entry.remove();
-        (data.key, data.value)
+        finish_removal(
+            self.head, self.tail, self.arena, self.node, key, value, prev, next,
+        )
+        .map(|entry| (entry.key, entry.value))
+        .unwrap()
     }
 
     /// Removes the entry from the map and returns the value.
