@@ -8,7 +8,7 @@ A linked hash map with intrusive doubly-linked list ordering and O(1) reordering
 - Maintains relative order of entries
 - O(1) reordering operations - Move entries to head/tail or before/after other entries
 - Cursor-based navigation and modification
-- `no_std` compatible
+- `no_std` compatible (requires `alloc` and `core`).
 
 ## Quick Start
 
