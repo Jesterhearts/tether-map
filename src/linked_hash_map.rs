@@ -1168,6 +1168,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_removal<K, T>(
     head: &mut Ptr,
     tail: &mut Ptr,
@@ -1370,7 +1371,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
                 (ptr, Some(old))
             }
             Entry::Vacant(vacant_entry) => {
-                let ptr = vacant_entry.insert_tail(value);
+                let (ptr, _) = vacant_entry.insert_tail(value);
                 (ptr, None)
             }
         }
@@ -1463,7 +1464,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
                 (ptr, Some(old))
             }
             Entry::Vacant(vacant_entry) => {
-                let ptr = vacant_entry.insert_tail(value);
+                let (ptr, _) = vacant_entry.insert_tail(value);
                 (ptr, None)
             }
         }
@@ -1905,7 +1906,7 @@ impl<'m, K: Hash + Eq, T, S: BuildHasher> CursorMut<'m, K, T, S> {
                 Some(core::mem::replace(self.map.ptr_get_mut(map_ptr)?, value))
             }
             Entry::Vacant(vacant_entry) => {
-                self.ptr = vacant_entry.insert_after(value, ptr);
+                self.ptr = vacant_entry.insert_after(value, ptr).0;
                 None
             }
         }
@@ -2293,6 +2294,37 @@ pub enum Entry<'a, K, V> {
     Vacant(VacantEntry<'a, K, V>),
 }
 
+impl<'a, K, V> Entry<'a, K, V>
+where
+    K: Hash + Eq,
+{
+    /// Ensures a value is in the entry by inserting the provided default if
+    /// vacant, and returns a mutable reference to the value in the entry.
+    ///
+    /// When inserting, the new entry is linked at the tail (end) of the list,
+    /// matching the behavior of `insert`/`insert_tail` for new keys.
+    pub fn or_insert(self, default: V) -> &'a mut V {
+        match self {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(v) => v.insert_tail(default).1,
+        }
+    }
+
+    /// If the entry is occupied, applies the provided function to the value in
+    /// place. Returns the entry for further chaining.
+    pub fn and_modify<F>(self, f: F) -> Self
+    where
+        F: FnOnce(&mut V),
+    {
+        if let Entry::Occupied(mut e) = self {
+            f(e.get_mut());
+            Entry::Occupied(e)
+        } else {
+            self
+        }
+    }
+}
+
 /// A view into an occupied entry in a `LinkedHashMap`.
 ///
 /// It is part of the [`Entry`] enum.
@@ -2320,7 +2352,7 @@ pub struct OccupiedEntry<'a, K, V> {
     tail: &'a mut Ptr,
 }
 
-impl<K, V> OccupiedEntry<'_, K, V> {
+impl<'a, K, V> OccupiedEntry<'a, K, V> {
     /// Returns a reference to the value in the entry.
     ///
     /// # Examples
@@ -2368,6 +2400,22 @@ impl<K, V> OccupiedEntry<'_, K, V> {
     /// ```
     pub fn get_mut(&mut self) -> &mut V {
         &mut self.arena[self.node].value
+    }
+
+    /// Consumes the occupied entry and returns a mutable reference to the
+    /// value.
+    ///
+    /// The returned reference is tied to the lifetime of the original map
+    /// borrow.
+    pub fn into_mut(self) -> &'a mut V {
+        let OccupiedEntry {
+            entry: _,
+            node,
+            arena,
+            head: _,
+            tail: _,
+        } = self;
+        &mut arena[node].value
     }
 
     /// Replaces the entry's value and returns the old value without moving the
@@ -2617,7 +2665,7 @@ pub struct VacantEntry<'a, K, V> {
     tail: &'a mut Ptr,
 }
 
-impl<K: Hash + Eq, V> VacantEntry<'_, K, V> {
+impl<'a, K: Hash + Eq, V> VacantEntry<'a, K, V> {
     /// Inserts a new entry at the tail (end) of the linked list.
     ///
     /// # Arguments
@@ -2646,7 +2694,7 @@ impl<K: Hash + Eq, V> VacantEntry<'_, K, V> {
     ///     Entry::Occupied(_) => unreachable!(),
     /// }
     /// ```
-    pub fn insert_tail(self, value: V) -> Ptr {
+    pub fn insert_tail(self, value: V) -> (Ptr, &'a mut V) {
         let after = *self.tail;
         self.insert_after(value, after)
     }
@@ -2675,12 +2723,12 @@ impl<K: Hash + Eq, V> VacantEntry<'_, K, V> {
     /// including the new entry in the list yet. In that case, you can create
     /// the entry with `push_unlinked()` and then later link it in using
     /// methods like `link_as_head()`, or `link_as_tail()`.
-    pub fn push_unlinked(self, value: V) -> Ptr {
+    pub fn push_unlinked(self, value: V) -> (Ptr, &'a mut V) {
         let ptr = self
             .nodes
             .alloc(self.key, value, self.hash, Ptr::null(), Ptr::null());
         self.entry.insert(ptr);
-        ptr
+        (ptr, &mut self.nodes[ptr].value)
     }
 
     /// Inserts a new entry immediately after the specified entry.
@@ -2717,7 +2765,7 @@ impl<K: Hash + Eq, V> VacantEntry<'_, K, V> {
     /// let entries: Vec<_> = map.iter().collect();
     /// assert_eq!(entries, [(&"first", &1), (&"second", &2), (&"third", &3)]);
     /// ```
-    pub fn insert_after(self, value: V, after: Ptr) -> Ptr {
+    pub fn insert_after(self, value: V, after: Ptr) -> (Ptr, &'a mut V) {
         if self.nodes.is_occupied(after) {
             let after_next = self.nodes.links(after).next();
             let ptr = self
@@ -2731,7 +2779,7 @@ impl<K: Hash + Eq, V> VacantEntry<'_, K, V> {
             if *self.tail == after {
                 *self.tail = ptr;
             }
-            ptr
+            (ptr, &mut self.nodes[ptr].value)
         } else if *self.head == Ptr::null() && *self.tail == Ptr::null() {
             debug_assert_eq!(after, Ptr::null());
             let ptr = self.nodes.next_ptr();
@@ -2740,7 +2788,7 @@ impl<K: Hash + Eq, V> VacantEntry<'_, K, V> {
             *self.head = ptr;
             *self.tail = *self.head;
             self.entry.insert(ptr);
-            *self.head
+            (*self.head, &mut self.nodes[*self.head].value)
         } else {
             let next = self.nodes.links(*self.tail).next();
             let ptr = self
@@ -2750,7 +2798,7 @@ impl<K: Hash + Eq, V> VacantEntry<'_, K, V> {
             *self.nodes.links_mut(next).prev_mut() = ptr;
             self.entry.insert(ptr);
             *self.tail = ptr;
-            ptr
+            (ptr, &mut self.nodes[ptr].value)
         }
     }
 
@@ -3883,7 +3931,7 @@ mod tests {
         match map.entry(1) {
             Entry::Vacant(entry) => {
                 assert_eq!(entry.key(), &1);
-                let ptr = entry.insert_tail(vec![1]);
+                let ptr = entry.insert_tail(vec![1]).0;
                 assert_ne!(ptr, Ptr::null());
             }
             Entry::Occupied(_) => panic!("Expected vacant entry"),
