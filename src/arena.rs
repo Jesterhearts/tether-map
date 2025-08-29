@@ -112,6 +112,71 @@ pub(crate) struct FreedSlot<K, T> {
     pub(crate) next_raw: Option<NonNull<LLSlot<K, T>>>,
 }
 
+/// Bump-allocated storage for intrusive linked-list nodes used by the map.
+///
+/// This arena owns all nodes (`LLSlot<K, T>`) backing the linked structure.
+/// It provides allocation, pointer-to-slot mapping, and reclamation via a
+/// freelist. The arena is intentionally minimal: it does not enforce list
+/// shape beyond basic unlinking on removal; higher-level invariants are
+/// maintained by the map layer.
+///
+/// Safety overview
+/// - Ownership and lifetime:
+///   - All nodes are allocated from an internal bump allocator and remain valid
+///     until the arena is dropped.
+///   - A node is either Occupied (`Links::Active`) or Free (`Links::Free`).
+///   - Methods that return raw `NonNull<LLSlot<_, _>>` are only sound while the
+///     slot remains Occupied. After a slot is freed, previously obtained raw
+///     pointers must not be used.
+/// - Pointer handle (`Ptr`):
+///   - [`Ptr`] is a compact, non-generational index into `slots`.
+///   - Once a slot is freed, its `Ptr` may be re-used for a new allocation. Do
+///     not assume temporal uniqueness. Using a `Ptr` after its slot was freed
+///     is a logic error and may panic (via indexing).
+/// - Invariants for occupied nodes:
+///   - `Links::Active { prev, next }` always references occupied nodes from
+///     this same arena (intrusive doubly-linked list).
+///   - A freshly allocated circular node has `prev == next == self`.
+///   - The map layer is responsible for maintaining global list shape (e.g.,
+///     biconnected circular list) when linking multiple nodes.
+/// - Invariants for free nodes:
+///   - `Links::Free(next)` forms a singly-linked list rooted at `free_head`.
+///   - Freed nodes must not be referenced by any occupied node's `prev/next`.
+/// - Unsafe contracts:
+///   - [`Links::next`], [`Links::prev`], and their `*_mut` variants require the
+///     link to be in `Active` state; [`Links::free`] requires `Free` state. The
+///     implementation uses `unreachable_unchecked()` on violation, so callers
+///     must uphold these preconditions.
+///   - [`Arena::free_and_unlink`] requires that the provided pointer comes from
+///     this arena and is currently occupied. It unlinks the node from its
+///     neighbors, transitions it to `Free`, and returns its data and neighbor
+///     metadata.
+/// - Aliasing and references:
+///   - Indexing (`Index`/`IndexMut`) converts a [`Ptr`] into shared/mutable
+///     references to the initialized payload. This is safe because these APIs
+///     check that the slot is still occupied and panic with "Invalid Ptr"
+///     otherwise, preventing creation of references to uninitialized memory.
+///   - The map layer ensures no illegal aliasing of `&mut` and `&` to the same
+///     element.
+/// - Drop semantics:
+///   - On drop, the arena iterates all slots and drops payloads only for
+///     occupied nodes. Free nodes are skipped to avoid double-drops.
+/// - Memory behavior:
+///   - Memory from the bump allocator is never returned to the system until the
+///     arena is dropped. Capacity grows monotonically; freed slots are reused
+///     via the freelist.
+///
+/// Internal data flow
+/// - Allocation:
+///   - If the freelist is non-empty, pop a slot, write payload, and set
+///     `Links::Active` (either circular self-links or provided `prev/next`).
+///   - Otherwise, allocate a new `LLSlot` from the bump arena and push its raw
+///     pointer into `slots` along with a new `Ptr` handle.
+/// - Freeing:
+///   - `free_and_unlink` writes `Links::Free(free_head)` into the node, updates
+///     neighbors (`prev.next = next`, `next.prev = prev`) if they are distinct,
+///     pushes the node to `free_head`, and returns the moved-out payload and
+///     neighbor information.
 #[derive(Debug)]
 pub(crate) struct Arena<K, T> {
     bump: Bump,
