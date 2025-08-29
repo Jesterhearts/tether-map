@@ -108,8 +108,8 @@ pub(crate) struct FreedSlot<K, T> {
     pub(crate) prev: Option<Ptr>,
     pub(crate) next: Option<Ptr>,
     pub(crate) this: Ptr,
-    pub(crate) prev_raw: *mut LLSlot<K, T>,
-    pub(crate) next_raw: *mut LLSlot<K, T>,
+    pub(crate) prev_raw: Option<NonNull<LLSlot<K, T>>>,
+    pub(crate) next_raw: Option<NonNull<LLSlot<K, T>>>,
 }
 
 #[derive(Debug)]
@@ -278,16 +278,16 @@ impl<K, T> Arena<K, T> {
 
             let (prev_external, prev_raw) = if prev != ptr {
                 *prev.as_mut().links.next_mut() = next;
-                (Some(prev.as_ref().this), prev.as_ptr())
+                (Some(prev.as_ref().this), Some(prev))
             } else {
-                (None, core::ptr::null_mut())
+                (None, None)
             };
 
             let (next_external, next_raw) = if next != ptr {
                 *next.as_mut().links.prev_mut() = prev;
-                (Some(next.as_ref().this), next.as_ptr())
+                (Some(next.as_ref().this), Some(next))
             } else {
-                (None, core::ptr::null_mut())
+                (None, None)
             };
 
             FreedSlot {
