@@ -349,7 +349,9 @@ impl<K, T> IndexMut<Ptr> for Arena<K, T> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::format;
     use alloc::string::String;
+    use alloc::string::ToString;
     use alloc::vec::Vec;
     use core::assert_eq;
 
