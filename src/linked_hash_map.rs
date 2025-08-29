@@ -5066,11 +5066,9 @@ mod tests {
         let (ptr1, _) = map.insert_tail_full("first", 1);
         let (ptr2, _) = map.insert_tail_full("second", 2);
 
-        // Remove an entry to test linking operations
         let removed = map.remove_ptr(ptr2).unwrap();
         assert_eq!(removed.key, "second");
 
-        // Test various link operations
         let (ptr3, _) = map.insert_tail_full("third", 3);
         assert!(map.link_after(ptr3, ptr1).is_some());
 
@@ -5085,21 +5083,18 @@ mod tests {
         let (ptr2, _) = map.insert_tail_full("b", 2);
         let (ptr3, _) = map.insert_tail_full("c", 3);
 
-        // Test next/prev pointer operations
         assert_eq!(map.next_ptr(ptr1), Some(ptr2));
         assert_eq!(map.next_ptr(ptr2), Some(ptr3));
-        assert_eq!(map.next_ptr(ptr3), Some(ptr1)); // Circular
+        assert_eq!(map.next_ptr(ptr3), Some(ptr1));
 
-        assert_eq!(map.prev_ptr(ptr1), Some(ptr3)); // Circular
+        assert_eq!(map.prev_ptr(ptr1), Some(ptr3));
         assert_eq!(map.prev_ptr(ptr2), Some(ptr1));
         assert_eq!(map.prev_ptr(ptr3), Some(ptr2));
 
-        // Test ptr_get variations
         assert_eq!(map.ptr_get(ptr1), Some(&1));
         assert_eq!(map.ptr_get_key(ptr2), Some(&"b"));
         assert_eq!(map.ptr_get_entry(ptr3), Some((&"c", &3)));
 
-        // Test mutable operations
         *map.ptr_get_mut(ptr1).unwrap() = 10;
         assert_eq!(map.ptr_get(ptr1), Some(&10));
 
@@ -5116,7 +5111,6 @@ mod tests {
         let (ptr2, _) = map.insert_tail_full("b", 2);
         let (ptr3, _) = map.insert_tail_full("c", 3);
 
-        // Test ptr_cursor_mut
         let mut cursor = map.ptr_cursor_mut(ptr2);
         if let Some((key, value)) = cursor.current_mut() {
             assert_eq!(key, &"b");
@@ -5124,7 +5118,6 @@ mod tests {
         }
         assert_eq!(map.ptr_get(ptr2), Some(&20));
 
-        // Test key_cursor_mut
         let mut cursor = map.key_cursor_mut(&"c");
         if let Some((key, value)) = cursor.current_mut() {
             assert_eq!(key, &"c");
@@ -5132,7 +5125,6 @@ mod tests {
         }
         assert_eq!(map.ptr_get(ptr3), Some(&30));
 
-        // Test head/tail cursors
         let cursor = map.head_cursor_mut();
         if let Some((key, _)) = cursor.current() {
             assert_eq!(key, &"a");
@@ -5151,26 +5143,22 @@ mod tests {
         let (ptr2, _) = map.insert_tail_full("b", 2);
         map.insert_tail_full("c", 3);
 
-        // Test remove_head
         let removed = map.remove_head().unwrap();
         assert_eq!(removed.key, "a");
         assert_eq!(removed.value, 1);
         assert_eq!(map.len(), 2);
 
-        // Test remove_tail
         let removed = map.remove_tail().unwrap();
         assert_eq!(removed.key, "c");
         assert_eq!(removed.value, 3);
         assert_eq!(map.len(), 1);
 
-        // Test remove_with_ptr
         let (removed_ptr, removed_entry) = map.remove_with_ptr(&"b").unwrap();
         assert_eq!(removed_ptr, ptr2);
         assert_eq!(removed_entry.key, "b");
         assert_eq!(removed_entry.value, 2);
         assert_eq!(map.len(), 0);
 
-        // Test remove operations on empty map
         assert_eq!(map.remove_head(), None);
         assert_eq!(map.remove_tail(), None);
         assert_eq!(map.remove_with_ptr(&"nonexistent"), None);
@@ -5189,7 +5177,6 @@ mod tests {
         let values: Vec<_> = map.values().cloned().collect();
         assert_eq!(values, vec![1, 2, 3]);
 
-        // Test values_mut
         for value in map.values_mut() {
             *value *= 2;
         }
@@ -5202,7 +5189,6 @@ mod tests {
     fn test_empty_map_edge_cases() {
         let mut map: LinkedHashMap<&str, i32> = LinkedHashMap::default();
 
-        // Test all operations on empty map
         assert_eq!(map.head_ptr(), None);
         assert_eq!(map.tail_ptr(), None);
         assert_eq!(map.remove(&"nonexistent"), None);
@@ -5210,17 +5196,130 @@ mod tests {
         assert_eq!(map.get_ptr(&"nonexistent"), None);
         assert!(!map.contains_ptr(Ptr::unchecked_from(0)));
 
-        // Test iterators on empty map
         assert_eq!(map.iter().count(), 0);
         assert_eq!(map.iter_mut().count(), 0);
         assert_eq!(map.keys().count(), 0);
         assert_eq!(map.values().count(), 0);
         assert_eq!(map.values_mut().count(), 0);
 
-        // Test retain on empty map
         map.retain(|_, _| true);
         assert!(map.is_empty());
 
-        map.shrink_to_fit(); // Should not panic
+        map.shrink_to_fit();
+    }
+
+    #[test]
+    fn test_link_as_head_and_tail_with_unlinked_push() {
+        let mut map = LinkedHashMap::default();
+
+        let ptr_x = match map.entry("x") {
+            Entry::Vacant(v) => v.push_unlinked(10).0,
+            _ => unreachable!(),
+        };
+
+        assert_eq!(map.head_ptr(), None);
+        assert_eq!(map.tail_ptr(), None);
+        assert_eq!(map.iter().count(), 0);
+
+        assert!(map.link_as_head(ptr_x).is_some());
+        assert_eq!(map.head_ptr(), Some(ptr_x));
+        assert_eq!(map.tail_ptr(), Some(ptr_x));
+
+        let items: Vec<_> = map.iter().collect();
+        assert_eq!(items, vec![(&"x", &10)]);
+
+        let ptr_y = match map.entry("y") {
+            Entry::Vacant(v) => v.push_unlinked(20).0,
+            _ => unreachable!(),
+        };
+        assert!(map.link_as_tail(ptr_y).is_some());
+
+        let items: Vec<_> = map.iter().collect();
+        assert_eq!(items, vec![(&"x", &10), (&"y", &20)]);
+        assert_eq!(map.tail_ptr(), Some(ptr_y));
+    }
+
+    #[test]
+    fn test_link_after_and_before_with_unlinked_nodes() {
+        let mut map = LinkedHashMap::default();
+        let (ptr_a, _) = map.insert_tail_full("a", 1);
+        let (_ptr_c, _) = map.insert_tail_full("c", 3);
+
+        let ptr_b = match map.entry("b") {
+            Entry::Vacant(v) => v.push_unlinked(2).0,
+            _ => unreachable!(),
+        };
+        assert!(map.link_after(ptr_b, ptr_a).is_some());
+        let keys: Vec<_> = map.iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, vec!["a", "b", "c"]);
+
+        let ptr_0 = match map.entry("0") {
+            Entry::Vacant(v) => v.push_unlinked(0).0,
+            _ => unreachable!(),
+        };
+        assert!(map.link_before(ptr_0, map.head_ptr().unwrap()).is_some());
+        let keys: Vec<_> = map.iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, vec!["0", "a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_entry_or_insert_and_and_modify() {
+        let mut map = LinkedHashMap::default();
+
+        {
+            let v_ref = map.entry("k").or_insert(1);
+            assert_eq!(*v_ref, 1);
+        }
+        assert_eq!(map.get(&"k"), Some(&1));
+
+        {
+            let e = map.entry("k").and_modify(|v| *v *= 10);
+            let v_ref = e.or_insert(999);
+            assert_eq!(*v_ref, 10);
+        }
+        assert_eq!(map.get(&"k"), Some(&10));
+    }
+
+    #[test]
+    fn test_retain_filter_and_mutation() {
+        let mut map = LinkedHashMap::default();
+        for i in 1..=6 {
+            map.insert_tail(i, i);
+        }
+
+        map.retain(|k, v| {
+            *v *= 10;
+            k % 2 == 0
+        });
+
+        let keys: Vec<_> = map.iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, vec![2, 4, 6]);
+        assert_eq!(map.get(&2), Some(&20));
+        assert_eq!(map.get(&4), Some(&40));
+        assert_eq!(map.get(&6), Some(&60));
+        assert_eq!(map.len(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "no entry found for key")]
+    fn test_index_key_panic_on_missing() {
+        let map: LinkedHashMap<&str, i32> = LinkedHashMap::default();
+        let _ = map[&"missing"];
+    }
+
+    #[test]
+    #[should_panic(expected = "no entry found for key")]
+    fn test_index_key_mut_panic_on_missing() {
+        let mut map: LinkedHashMap<&str, i32> = LinkedHashMap::default();
+        map[&"missing"] = 1;
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid Ptr")]
+    fn test_index_ptr_panic_after_removal() {
+        let mut map = LinkedHashMap::default();
+        let (ptr, _) = map.insert_tail_full("a", 1);
+        let _ = map.remove_ptr(ptr).unwrap();
+        let _ = map[ptr];
     }
 }

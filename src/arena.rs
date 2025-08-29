@@ -768,4 +768,42 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_arena_unlink_middle_updates_neighbors_and_reuse() {
+        let mut arena = Arena::new();
+        let mut a = arena.alloc_circular('a', 1);
+        let mut b = arena.alloc('b', 2, a, a);
+        let mut c = arena.alloc('c', 3, b, a);
+
+        unsafe {
+            *a.as_mut().links.next_mut() = b;
+            *a.as_mut().links.prev_mut() = b;
+
+            *b.as_mut().links.next_mut() = c;
+            *b.as_mut().links.prev_mut() = a;
+            *a.as_mut().links.prev_mut() = c;
+
+            assert_eq!(a.as_ref().links.next().as_ptr(), b.as_ptr());
+            assert_eq!(b.as_ref().links.prev().as_ptr(), a.as_ptr());
+            assert_eq!(b.as_ref().links.next().as_ptr(), c.as_ptr());
+            assert_eq!(c.as_ref().links.prev().as_ptr(), b.as_ptr());
+            assert_eq!(c.as_ref().links.next().as_ptr(), a.as_ptr());
+            assert_eq!(a.as_ref().links.prev().as_ptr(), c.as_ptr());
+
+            let freed_b = arena.free_and_unlink(b);
+            assert_eq!(freed_b.data.key, 'b');
+            assert!(arena.map_ptr(freed_b.this).is_none());
+
+            assert_eq!(a.as_ref().links.next().as_ptr(), c.as_ptr());
+            assert_eq!(c.as_ref().links.prev().as_ptr(), a.as_ptr());
+
+            let d = arena.alloc('d', 4, a, c);
+            *a.as_mut().links.next_mut() = d;
+            *c.as_mut().links.prev_mut() = d;
+            assert_eq!(d.as_ref().this, freed_b.this);
+            assert_eq!(a.as_ref().links.next().as_ptr(), d.as_ptr());
+            assert_eq!(c.as_ref().links.prev().as_ptr(), d.as_ptr());
+        }
+    }
 }
