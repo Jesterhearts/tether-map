@@ -1,0 +1,42 @@
+name: miri
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  miri:
+    name: Miri (UB checks)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cfg:
+          - name: default-features
+            args: ""
+          - name: no-default-features
+            args: "--no-default-features"
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly with Miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: miri-${{ matrix.cfg.name }}
+
+      - name: Setup Miri
+        run: cargo miri setup
+
+      - name: Run Miri tests (${{ matrix.cfg.name }})
+        run: cargo miri test ${{ matrix.cfg.args }}

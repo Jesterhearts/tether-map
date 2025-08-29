@@ -1,192 +1,304 @@
 use alloc::vec::Vec;
-use core::{
-    clone::Clone,
-    ops::{
-        Index,
-        IndexMut,
-    },
-    panic,
-};
+use core::clone::Clone;
+use core::fmt::Debug;
+use core::hint::unreachable_unchecked;
+use core::mem::MaybeUninit;
+use core::ops::Index;
+use core::ops::IndexMut;
+use core::ptr::NonNull;
+
+use bumpalo::Bump;
 
 use crate::Ptr;
 
-#[cold]
-#[inline(never)]
-fn assert_free() -> ! {
-    panic!("Attempted to access data of free slot");
-}
-
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LLData<K, T> {
-    pub(crate) prev: Ptr,
-    pub(crate) hash: u64,
     pub(crate) key: K,
     pub(crate) value: T,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum DataOrFree<K, T> {
-    Free,
-    Data(LLData<K, T>),
+impl<K, T> LLData<K, T> {
+    pub(crate) fn key_value_mut(&mut self) -> (&K, &mut T) {
+        (&self.key, &mut self.value)
+    }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Links<K, T> {
+    Active {
+        prev: NonNull<LLSlot<K, T>>,
+        next: NonNull<LLSlot<K, T>>,
+    },
+    Free(Option<NonNull<LLSlot<K, T>>>),
+}
+
+impl<K, T> Links<K, T> {
+    /// # Safety
+    ///
+    /// The caller must ensure that the Links is in the Active state.
+    pub(crate) unsafe fn next(&self) -> NonNull<LLSlot<K, T>> {
+        match self {
+            Links::Active { next, .. } => *next,
+            Links::Free(_) => unsafe { unreachable_unchecked() },
+        }
+    }
+
+    /// # Safety
+    ///
+    /// The caller must ensure that the Links is in the Active state.
+    pub(crate) unsafe fn next_mut(&mut self) -> &mut NonNull<LLSlot<K, T>> {
+        match self {
+            Links::Active { next, .. } => next,
+            Links::Free(_) => unsafe { unreachable_unchecked() },
+        }
+    }
+
+    /// # Safety
+    ///
+    /// The caller must ensure that the Links is in the Active state.
+    pub(crate) unsafe fn prev(&self) -> NonNull<LLSlot<K, T>> {
+        match self {
+            Links::Active { prev, .. } => *prev,
+            Links::Free(_) => unsafe { unreachable_unchecked() },
+        }
+    }
+
+    /// # Safety
+    ///
+    /// The caller must ensure that the Links is in the Active state.
+    pub(crate) unsafe fn prev_mut(&mut self) -> &mut NonNull<LLSlot<K, T>> {
+        match self {
+            Links::Active { prev, .. } => prev,
+            Links::Free(_) => unsafe { unreachable_unchecked() },
+        }
+    }
+
+    /// # Safety
+    ///
+    /// The caller must ensure that the Links is in the Free state.
+    pub(crate) unsafe fn free(&self) -> Option<NonNull<LLSlot<K, T>>> {
+        match self {
+            Links::Free(next) => *next,
+            Links::Active { .. } => unsafe { unreachable_unchecked() },
+        }
+    }
+}
+
 pub(crate) struct LLSlot<K, T> {
-    next: Ptr,
-    data: DataOrFree<K, T>,
+    pub(crate) this: Ptr,
+    pub(crate) data: MaybeUninit<LLData<K, T>>,
+    pub(crate) links: Links<K, T>,
 }
 
-impl<K, T> LLSlot<K, T> {
-    pub(crate) fn prev(&self) -> Ptr {
-        match &self.data {
-            DataOrFree::Data(data) => data.prev,
-            DataOrFree::Free => assert_free(),
-        }
-    }
-
-    pub(crate) fn prev_mut(&mut self) -> &mut Ptr {
-        match &mut self.data {
-            DataOrFree::Data(data) => &mut data.prev,
-            DataOrFree::Free => assert_free(),
-        }
-    }
-
-    pub(crate) fn next(&self) -> Ptr {
-        self.next
-    }
-
-    pub(crate) fn next_mut(&mut self) -> &mut Ptr {
-        &mut self.next
-    }
-
-    pub(crate) fn into_data(self) -> LLData<K, T> {
-        match self.data {
-            DataOrFree::Data(data) => data,
-            DataOrFree::Free => assert_free(),
-        }
-    }
-
-    pub(crate) fn data(&self) -> &LLData<K, T> {
-        match &self.data {
-            DataOrFree::Data(data) => data,
-            DataOrFree::Free => assert_free(),
-        }
-    }
-
-    pub(crate) fn data_mut(&mut self) -> &mut LLData<K, T> {
-        match &mut self.data {
-            DataOrFree::Data(data) => data,
-            DataOrFree::Free => assert_free(),
-        }
+impl<K, T> Debug for LLSlot<K, T>
+where
+    K: Debug,
+    T: Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("LLSlot")
+            .field("this", &self.this)
+            .field("links", &self.links)
+            .finish()
     }
 }
 
-#[derive(Debug, Clone)]
+pub(crate) struct FreedSlot<K, T> {
+    pub(crate) data: LLData<K, T>,
+    pub(crate) prev: Option<Ptr>,
+    pub(crate) next: Option<Ptr>,
+    pub(crate) this: Ptr,
+    pub(crate) prev_raw: *mut LLSlot<K, T>,
+    pub(crate) next_raw: *mut LLSlot<K, T>,
+}
+
+#[derive(Debug)]
 pub(crate) struct Arena<K, T> {
-    nodes: Vec<LLSlot<K, T>>,
-    free_head: Ptr,
+    bump: Bump,
+    slots: Vec<NonNull<LLSlot<K, T>>>,
+    free_head: Option<NonNull<LLSlot<K, T>>>,
+}
+
+impl<K, T> Drop for Arena<K, T> {
+    fn drop(&mut self) {
+        for mut slot in self.slots.drain(..) {
+            // SAFETY: We own all slots, so they are valid. We check for free before
+            // dropping data.
+            unsafe {
+                match slot.as_ref().links {
+                    Links::Free(_) => continue,
+                    Links::Active { .. } => {
+                        slot.as_mut().data.assume_init_drop();
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl<K, T> Arena<K, T> {
     pub(crate) fn new() -> Self {
         Arena {
-            nodes: Vec::new(),
-            free_head: Ptr::null(),
+            bump: Bump::new(),
+            slots: Vec::new(),
+            free_head: None,
         }
     }
 
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Arena {
-            nodes: Vec::with_capacity(capacity),
-            free_head: Ptr::null(),
+            bump: Bump::with_capacity(capacity * size_of::<LLSlot<K, T>>()),
+            slots: Vec::with_capacity(capacity),
+            free_head: None,
         }
     }
 
-    pub(crate) fn links(&self, ptr: Ptr) -> &LLSlot<K, T> {
-        &self.nodes[ptr.unchecked_get()]
-    }
+    pub(crate) fn alloc_circular(&mut self, key: K, value: T) -> NonNull<LLSlot<K, T>> {
+        if let Some(mut free_head) = self.free_head {
+            // SAFETY: We have nodes in our free list, so free_head is valid.
+            let ptr = unsafe { free_head.as_mut() };
+            let new_node = free_head;
+            // SAFETY: Node is free, so links.free is valid
+            self.free_head = unsafe { ptr.links.free() };
 
-    pub(crate) fn links_mut(&mut self, ptr: Ptr) -> &mut LLSlot<K, T> {
-        &mut self.nodes[ptr.unchecked_get()]
-    }
+            ptr.data.write(LLData { key, value });
+            ptr.links = Links::Active {
+                prev: new_node,
+                next: new_node,
+            };
 
-    pub(crate) fn clear(&mut self) {
-        self.nodes.clear();
-        self.free_head = Ptr::null();
-    }
-
-    pub(crate) fn shrink_to_fit(&mut self) {
-        // Note: This may not even shrink anything if the arena has free slots. In
-        // general, it's not possible to move around the nodes, since there may be
-        // external Ptrs pointing to them. So this is the best we can do.
-        // It *might* be possible to compact the arena by moving occupied nodes to
-        // fill in free slots, but would require keeping a mapping of all moved Ptrs so
-        // they can be remapped when calling free/index/etc. That might even *increase*
-        // memory used depending on the exact usage pattern and would both add
-        // complexity and likely be slower in the happy path.
-        self.nodes.shrink_to_fit();
-    }
-
-    pub(crate) fn next_ptr(&self) -> Ptr {
-        self.free_head.or(Ptr::unchecked_from(self.nodes.len()))
-    }
-
-    pub(crate) fn alloc(&mut self, key: K, value: T, hash: u64, prev: Ptr, next: Ptr) -> Ptr {
-        if !self.free_head.is_null() {
-            let old = core::mem::replace(
-                &mut self.nodes[self.free_head.unchecked_get()],
-                LLSlot {
-                    next,
-                    data: DataOrFree::Data(LLData {
-                        prev,
-                        key,
-                        value,
-                        hash,
-                    }),
-                },
-            );
-            let ptr = self.free_head;
-            self.free_head = old.next;
-            ptr
+            new_node
         } else {
-            let ptr = Ptr::unchecked_from(self.nodes.len());
-            self.nodes.push(LLSlot {
-                next,
-                data: DataOrFree::Data(LLData {
-                    prev,
-                    key,
-                    value,
-                    hash,
-                }),
+            let this = Ptr::unchecked_from(self.slots.len());
+            let slot = self
+                .bump
+                .alloc_layout(core::alloc::Layout::new::<LLSlot<K, T>>())
+                .cast();
+
+            // SAFETY: We just allocated this slot, so it is valid to write to.
+            unsafe {
+                slot.write(LLSlot {
+                    links: Links::Active {
+                        prev: slot,
+                        next: slot,
+                    },
+                    this,
+                    data: MaybeUninit::new(LLData { key, value }),
+                });
+            }
+
+            self.slots.push(slot);
+            slot
+        }
+    }
+
+    pub(crate) fn alloc(
+        &mut self,
+        key: K,
+        value: T,
+        prev: NonNull<LLSlot<K, T>>,
+        next: NonNull<LLSlot<K, T>>,
+    ) -> NonNull<LLSlot<K, T>> {
+        if let Some(mut free_head) = self.free_head {
+            // SAFETY: We have nodes in our free list, so free_head is valid.
+            let ptr = unsafe { free_head.as_mut() };
+            let new_node = free_head;
+            // SAFETY: Node is free, so links.free is valid
+            self.free_head = unsafe { ptr.links.free() };
+            ptr.data.write(LLData { key, value });
+
+            ptr.links = Links::Active { prev, next };
+
+            new_node
+        } else {
+            let this = Ptr::unchecked_from(self.slots.len());
+            let new_node = self.bump.alloc(LLSlot {
+                links: Links::Active { prev, next },
+                this,
+                data: MaybeUninit::new(LLData { key, value }),
             });
-            ptr
+
+            let new_node = NonNull::from_mut(new_node);
+            self.slots.push(new_node);
+            new_node
         }
     }
 
     pub(crate) fn is_occupied(&self, ptr: Ptr) -> bool {
-        if ptr.is_null() {
-            return false;
+        // SAFETY: We check that only store valid Ptrs in slots, so if the index is
+        // out of bounds, we return false. If it is in bounds, we check if it is free.
+        unsafe {
+            self.slots
+                .get(ptr.unchecked_get())
+                .is_some_and(|ptr| matches!(ptr.as_ref().links, Links::Active { .. }))
         }
-        matches!(self.nodes[ptr.unchecked_get()].data, DataOrFree::Data(_))
     }
 
-    pub(crate) fn free(&mut self, ptr: Ptr) -> LLSlot<K, T> {
-        assert!(self.is_occupied(ptr), "Pointer to free must be occupied");
-        let result = core::mem::replace(
-            &mut self.nodes[ptr.unchecked_get()],
-            LLSlot {
-                next: self.free_head,
-                data: DataOrFree::Free,
-            },
-        );
-        self.free_head = ptr;
-
-        result
+    pub(crate) fn map_ptr(&self, ptr: Ptr) -> Option<NonNull<LLSlot<K, T>>> {
+        // SAFETY: We check that only store valid Ptrs in slots, so if the index is
+        // out of bounds, we return None. If it is in bounds, we return the pointer if
+        // it is occupied.
+        unsafe {
+            self.slots
+                .get(ptr.unchecked_get())
+                .copied()
+                .filter(|ptr| matches!(ptr.as_ref().links, Links::Active { .. }))
+        }
     }
 
-    #[cfg(feature = "iter-mut")]
-    pub(crate) fn arena_ptr(&mut self) -> *mut LLSlot<K, T> {
-        self.nodes.as_mut_ptr()
+    /// # Safety
+    ///
+    /// The provided pointer must be valid and currently occupied.
+    #[inline]
+    pub(crate) unsafe fn free_and_unlink(
+        &mut self,
+        mut ptr: NonNull<LLSlot<K, T>>,
+    ) -> FreedSlot<K, T> {
+        // SAFETY: We know this pointer is valid and occupied per contract. We mark the
+        // slot as free and return the data. We never read from data again after
+        // this until after it is overwritten in alloc or alloc_circular.
+        unsafe {
+            let (data, this, mut prev, mut next) = {
+                let links = Links::Free(self.free_head);
+                self.free_head = Some(ptr);
+
+                let ref_mut = ptr.as_mut();
+
+                let prev = ref_mut.links.prev();
+                let next = ref_mut.links.next();
+                ref_mut.links = links;
+
+                (
+                    MaybeUninit::assume_init_read(&ref_mut.data),
+                    ref_mut.this,
+                    prev,
+                    next,
+                )
+            };
+
+            let (prev_external, prev_raw) = if prev != ptr {
+                *prev.as_mut().links.next_mut() = next;
+                (Some(prev.as_ref().this), prev.as_ptr())
+            } else {
+                (None, core::ptr::null_mut())
+            };
+
+            let (next_external, next_raw) = if next != ptr {
+                *next.as_mut().links.prev_mut() = prev;
+                (Some(next.as_ref().this), next.as_ptr())
+            } else {
+                (None, core::ptr::null_mut())
+            };
+
+            FreedSlot {
+                data,
+                prev: prev_external,
+                next: next_external,
+                prev_raw,
+                next_raw,
+                this,
+            }
+        }
     }
 }
 
@@ -194,283 +306,464 @@ impl<K, T> Index<Ptr> for Arena<K, T> {
     type Output = LLData<K, T>;
 
     fn index(&self, index: Ptr) -> &Self::Output {
-        self.nodes[index.unchecked_get()].data()
+        // SAFETY: We know this pointer comes from this arena, and we check that it is
+        // occupied before returning a reference to the data.
+        unsafe {
+            let ptr = self.slots[index.unchecked_get()].as_ref();
+            match ptr.links {
+                Links::Free(_) => {
+                    #[cold]
+                    #[inline(never)]
+                    fn die() -> ! {
+                        panic!("Invalid Ptr");
+                    }
+                    die();
+                }
+                Links::Active { .. } => ptr.data.assume_init_ref(),
+            }
+        }
     }
 }
 
 impl<K, T> IndexMut<Ptr> for Arena<K, T> {
     fn index_mut(&mut self, index: Ptr) -> &mut Self::Output {
-        self.nodes[index.unchecked_get()].data_mut()
+        // SAFETY: We know this pointer comes from this arena, and we check that it is
+        // occupied before returning a mutable reference to the data. The returned
+        // lifetime is tied to our lifetime, so we won't have aliasing issues.
+        unsafe {
+            let ptr = self.slots[index.unchecked_get()].as_mut();
+            match ptr.links {
+                Links::Free(_) => {
+                    #[cold]
+                    #[inline(never)]
+                    fn die() -> ! {
+                        panic!("Invalid Ptr");
+                    }
+                    die();
+                }
+                Links::Active { .. } => ptr.data.assume_init_mut(),
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use alloc::{
-        format,
-        string::ToString,
-        vec,
-        vec::Vec,
-    };
+    use alloc::string::String;
+    use alloc::vec::Vec;
     use core::assert_eq;
 
     use super::*;
 
     #[test]
-    fn test_ptr_null() {
-        let null_ptr = Ptr::null();
-        assert!(null_ptr.is_null());
-        assert_eq!(null_ptr.optional(), None);
-    }
-
-    #[test]
-    fn test_ptr_non_null() {
-        let ptr = Ptr::unchecked_from(42);
-        assert!(!ptr.is_null());
-        assert_eq!(ptr.optional(), Some(ptr));
-        assert_eq!(ptr.unchecked_get(), 42);
-    }
-
-    #[test]
-    fn test_ptr_or() {
-        let null_ptr = Ptr::null();
-        let some_ptr = Ptr::unchecked_from(10);
-        let other_ptr = Ptr::unchecked_from(20);
-
-        assert_eq!(null_ptr.or(some_ptr), some_ptr);
-        assert_eq!(some_ptr.or(other_ptr), some_ptr);
-    }
-
-    #[test]
-    fn test_ptr_debug() {
-        let null_ptr = Ptr::null();
-        let some_ptr = Ptr::unchecked_from(42);
-
-        assert_eq!(format!("{:?}", null_ptr), "Ptr(null)");
-        assert_eq!(format!("{:?}", some_ptr), "Ptr(42)");
-    }
-
-    #[test]
-    fn test_ptr_default() {
-        let default_ptr: Ptr = Default::default();
-        assert!(default_ptr.is_null());
-    }
-
-    #[test]
-    fn test_ptr_equality() {
-        let ptr1 = Ptr::unchecked_from(42);
-        let ptr2 = Ptr::unchecked_from(42);
-        let ptr3 = Ptr::unchecked_from(43);
-
-        assert_eq!(ptr1, ptr2);
-        assert_ne!(ptr1, ptr3);
-    }
-
-    #[test]
-    fn test_arena_new() {
-        let arena: Arena<i32, Vec<i32>> = Arena::new();
-        assert_eq!(arena.nodes.len(), 0);
-        assert!(arena.free_head.is_null());
-    }
-
-    #[test]
-    fn test_arena_with_capacity() {
-        let arena: Arena<i32, Vec<i32>> = Arena::with_capacity(10);
-        assert_eq!(arena.nodes.capacity(), 10);
-    }
-
-    #[test]
-    fn test_arena_alloc_single() {
+    fn test_arena_alloc_circular_basic() {
         let mut arena = Arena::new();
-        let ptr = arena.alloc(42, vec![1, 2, 3, 4, 5], 12345, Ptr::null(), Ptr::null());
+        let ptr = arena.alloc_circular(42, "hello".to_string());
 
-        assert!(!ptr.is_null());
-        assert!(arena.is_occupied(ptr));
-        assert_eq!(arena.nodes.len(), 1);
-
-        let data = &arena[ptr];
-        assert_eq!(data.key, 42);
-        assert_eq!(data.value, [1, 2, 3, 4, 5]);
-        assert_eq!(data.hash, 12345);
+        unsafe {
+            let slot = ptr.as_ref();
+            assert_eq!(slot.data.assume_init_ref().key, 42);
+            assert_eq!(slot.data.assume_init_ref().value, "hello");
+            assert_eq!(
+                slot.links,
+                Links::Active {
+                    prev: ptr,
+                    next: ptr
+                }
+            );
+        }
     }
 
     #[test]
-    fn test_arena_alloc_multiple() {
+    fn test_arena_alloc_circular_multiple() {
         let mut arena = Arena::new();
-        let ptr1 = arena.alloc(1, "one".to_string(), 111, Ptr::null(), Ptr::null());
-        let ptr2 = arena.alloc(2, "two".to_string(), 222, Ptr::null(), Ptr::null());
-        let ptr3 = arena.alloc(3, "three".to_string(), 333, Ptr::null(), Ptr::null());
+        let ptr1 = arena.alloc_circular(1, "first".to_string());
+        let ptr2 = arena.alloc_circular(2, "second".to_string());
 
-        assert_ne!(ptr1, ptr2);
-        assert_ne!(ptr2, ptr3);
-        assert_ne!(ptr1, ptr3);
+        assert_ne!(ptr1.as_ptr(), ptr2.as_ptr());
 
-        assert!(arena.is_occupied(ptr1));
-        assert!(arena.is_occupied(ptr2));
-        assert!(arena.is_occupied(ptr3));
+        unsafe {
+            let slot1 = ptr1.as_ref();
+            let slot2 = ptr2.as_ref();
 
-        assert_eq!(arena[ptr1].key, 1);
-        assert_eq!(arena[ptr2].key, 2);
-        assert_eq!(arena[ptr3].key, 3);
+            assert_eq!(slot1.data.assume_init_ref().key, 1);
+            assert_eq!(slot2.data.assume_init_ref().key, 2);
+
+            assert_eq!(
+                slot1.links,
+                Links::Active {
+                    prev: ptr1,
+                    next: ptr1
+                }
+            );
+            assert_eq!(
+                slot2.links,
+                Links::Active {
+                    prev: ptr2,
+                    next: ptr2
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn test_arena_alloc_basic() {
+        let mut arena = Arena::new();
+        let ptr1 = arena.alloc_circular(1, "first".to_string());
+        let ptr2 = arena.alloc(2, "second".to_string(), ptr1, ptr1);
+
+        unsafe {
+            let slot2 = ptr2.as_ref();
+
+            assert_eq!(
+                slot2.links,
+                Links::Active {
+                    prev: ptr1,
+                    next: ptr1
+                }
+            );
+            assert_eq!(slot2.data.assume_init_ref().key, 2);
+            assert_eq!(slot2.data.assume_init_ref().value, "second");
+        }
+    }
+
+    #[test]
+    fn test_arena_is_occupied_after_alloc() {
+        let mut arena = Arena::new();
+        let ptr = arena.alloc_circular(42, "test".to_string());
+
+        unsafe {
+            let slot = ptr.as_ref();
+            assert!(arena.is_occupied(slot.this));
+        }
+    }
+
+    #[test]
+    fn test_arena_is_occupied_out_of_bounds() {
+        let arena: Arena<i32, String> = Arena::new();
+        let invalid_ptr = Ptr::unchecked_from(100);
+        assert!(!arena.is_occupied(invalid_ptr));
+    }
+
+    #[test]
+    fn test_arena_map_ptr_valid() {
+        let mut arena = Arena::new();
+        let ptr = arena.alloc_circular(42, "test".to_string());
+
+        unsafe {
+            let slot = ptr.as_ref();
+            let mapped = arena.map_ptr(slot.this);
+            assert!(mapped.is_some());
+            assert_eq!(mapped.unwrap().as_ptr(), ptr.as_ptr());
+        }
+    }
+
+    #[test]
+    fn test_arena_map_ptr_invalid() {
+        let arena: Arena<i32, String> = Arena::new();
+        let invalid_ptr = Ptr::unchecked_from(100);
+        assert_eq!(arena.map_ptr(invalid_ptr), None);
+    }
+
+    #[test]
+    fn test_arena_indexing() {
+        let mut arena = Arena::new();
+        let ptr = arena.alloc_circular(42, "hello".to_string());
+
+        unsafe {
+            let slot = ptr.as_ref();
+            let data = &arena[slot.this];
+            assert_eq!(data.key, 42);
+            assert_eq!(data.value, "hello");
+        }
+    }
+
+    #[test]
+    fn test_arena_indexing_mut() {
+        let mut arena = Arena::new();
+        let ptr = arena.alloc_circular(42, "hello".to_string());
+
+        unsafe {
+            let slot = ptr.as_ref();
+            let this_ptr = slot.this;
+
+            arena[this_ptr].value = "modified".to_string();
+            assert_eq!(arena[this_ptr].value, "modified");
+
+            let (key, value) = arena[this_ptr].key_value_mut();
+            assert_eq!(*key, 42);
+            *value = "mutated".to_string();
+            assert_eq!(arena[this_ptr].value, "mutated");
+        }
+    }
+
+    #[test]
+    fn test_arena_free_basic() {
+        let mut arena = Arena::new();
+        let ptr = arena.alloc_circular(42, "hello".to_string());
+
+        unsafe {
+            let slot = ptr.as_ref();
+            let this_ptr = slot.this;
+
+            assert!(arena.is_occupied(this_ptr));
+
+            let freed = arena.free_and_unlink(ptr);
+
+            assert!(!arena.is_occupied(this_ptr));
+            assert_eq!(arena.map_ptr(this_ptr), None);
+            assert_eq!(freed.data.key, 42);
+            assert_eq!(freed.data.value, "hello");
+        }
     }
 
     #[test]
     fn test_arena_free_and_reuse() {
         let mut arena = Arena::new();
-        let ptr1 = arena.alloc(1, "one".to_string(), 111, Ptr::null(), Ptr::null());
-        let ptr2 = arena.alloc(2, "two".to_string(), 222, Ptr::null(), Ptr::null());
+        let ptr1 = arena.alloc_circular(1, "first".to_string());
 
-        assert!(arena.is_occupied(ptr1));
-        assert!(arena.is_occupied(ptr2));
+        unsafe {
+            let slot1 = ptr1.as_ref();
+            let first_this = slot1.this;
 
-        let data = arena.free(ptr1);
-        assert_eq!(data.data().key, 1);
-        assert_eq!(data.data().value, "one");
-        assert!(!arena.is_occupied(ptr1));
-        assert!(arena.is_occupied(ptr2));
+            arena.free_and_unlink(ptr1);
+            assert!(!arena.is_occupied(first_this));
 
-        let ptr3 = arena.alloc(3, "three".to_string(), 333, Ptr::null(), Ptr::null());
-        assert_eq!(ptr3, ptr1);
-        assert!(arena.is_occupied(ptr3));
-        assert_eq!(arena[ptr3].key, 3);
+            let ptr2 = arena.alloc_circular(2, "second".to_string());
+            let slot2 = ptr2.as_ref();
+
+            assert_eq!(slot2.this, first_this);
+            assert!(arena.is_occupied(first_this));
+            assert_eq!(arena[first_this].key, 2);
+            assert_eq!(arena[first_this].value, "second");
+        }
     }
 
     #[test]
-    fn test_arena_index_operations() {
+    fn test_arena_multiple_free_and_reuse() {
         let mut arena = Arena::new();
-        let ptr = arena.alloc(42, "hello".to_string(), 12345, Ptr::null(), Ptr::null());
+        let ptr1 = arena.alloc_circular(1, "first".to_string());
+        let ptr2 = arena.alloc_circular(2, "second".to_string());
+        let ptr3 = arena.alloc_circular(3, "third".to_string());
 
-        let data = &arena[ptr];
-        assert_eq!(data.key, 42);
-        assert_eq!(data.value, "hello");
+        unsafe {
+            let this1 = ptr1.as_ref().this;
+            let this2 = ptr2.as_ref().this;
+            let this3 = ptr3.as_ref().this;
 
-        arena[ptr].value = "world".to_string();
-        assert_eq!(arena[ptr].value, "world");
+            arena.free_and_unlink(ptr2);
+            arena.free_and_unlink(ptr1);
+
+            assert!(!arena.is_occupied(this1));
+            assert!(!arena.is_occupied(this2));
+            assert!(arena.is_occupied(this3));
+
+            let ptr4 = arena.alloc_circular(4, "fourth".to_string());
+            let ptr5 = arena.alloc_circular(5, "fifth".to_string());
+
+            let this4 = ptr4.as_ref().this;
+            let this5 = ptr5.as_ref().this;
+
+            assert_eq!(this5, this2);
+            assert_eq!(this4, this1);
+
+            assert_eq!(arena[this4].key, 4);
+            assert_eq!(arena[this5].key, 5);
+        }
     }
 
     #[test]
-    fn test_arena_links() {
+    fn test_arena_with_capacity_allocation() {
+        let capacity = 100;
+        let mut arena: Arena<i32, String> = Arena::with_capacity(capacity);
+
+        for i in 0..10 {
+            let ptr = arena.alloc_circular(i, format!("value_{}", i));
+            unsafe {
+                let slot = ptr.as_ref();
+                assert_eq!(slot.data.assume_init_ref().key, i);
+                assert_eq!(slot.data.assume_init_ref().value, format!("value_{}", i));
+            }
+        }
+    }
+
+    #[test]
+    fn test_lldata_key_value_mut() {
+        let mut data = LLData {
+            key: 42,
+            value: "hello".to_string(),
+        };
+
+        let (key, value) = data.key_value_mut();
+        assert_eq!(*key, 42);
+        assert_eq!(value, "hello");
+
+        *value = "modified".to_string();
+        assert_eq!(data.value, "modified");
+    }
+
+    #[test]
+    fn test_arena_drop_with_occupied_slots() {
+        {
+            let mut arena = Arena::new();
+            let _ptr1 = arena.alloc_circular(1, Vec::from([1, 2, 3]));
+            let _ptr2 = arena.alloc_circular(2, Vec::from([4, 5, 6]));
+            let _ptr3 = arena.alloc_circular(3, Vec::from([7, 8, 9]));
+        }
+    }
+
+    #[test]
+    fn test_arena_drop_with_mixed_slots() {
+        {
+            let mut arena = Arena::new();
+            let ptr1 = arena.alloc_circular(1, Vec::from([1, 2, 3]));
+            let _ptr2 = arena.alloc_circular(2, Vec::from([4, 5, 6]));
+
+            unsafe {
+                arena.free_and_unlink(ptr1);
+            }
+        }
+    }
+
+    #[test]
+    fn test_freed_slot_structure() {
         let mut arena = Arena::new();
-        let ptr = arena.alloc(42, "hello".to_string(), 12345, Ptr::null(), Ptr::null());
+        let ptr1 = arena.alloc_circular(1, "first".to_string());
+        let ptr2 = arena.alloc(2, "second".to_string(), ptr1, ptr1);
 
-        let links = arena.links(ptr);
-        assert!(links.prev().is_null());
-        assert!(links.next().is_null());
+        unsafe {
+            let freed = arena.free_and_unlink(ptr2);
 
-        let links_mut = arena.links_mut(ptr);
-        *links_mut.prev_mut() = Ptr::unchecked_from(10);
-        *links_mut.next_mut() = Ptr::unchecked_from(20);
-
-        let links = arena.links(ptr);
-        assert_eq!(links.prev(), Ptr::unchecked_from(10));
-        assert_eq!(links.next(), Ptr::unchecked_from(20));
+            assert_eq!(freed.data.key, 2);
+            assert_eq!(freed.data.value, "second");
+        }
     }
 
     #[test]
-    fn test_arena_clear() {
+    #[should_panic(expected = "Invalid Ptr")]
+    fn test_arena_index_panic_on_freed() {
         let mut arena = Arena::new();
-        arena.alloc(1, "one".to_string(), 111, Ptr::null(), Ptr::null());
-        arena.alloc(2, "two".to_string(), 222, Ptr::null(), Ptr::null());
+        let ptr = arena.alloc_circular(42, "test".to_string());
 
-        assert_eq!(arena.nodes.len(), 2);
-
-        arena.clear();
-
-        assert_eq!(arena.nodes.len(), 0);
-        assert!(arena.free_head.is_null());
+        unsafe {
+            let slot = ptr.as_ref();
+            let this_ptr = slot.this;
+            arena.free_and_unlink(ptr);
+            let _ = &arena[this_ptr];
+        }
     }
 
     #[test]
-    fn test_arena_clone() {
+    #[should_panic(expected = "Invalid Ptr")]
+    fn test_arena_index_mut_panic_on_freed() {
         let mut arena = Arena::new();
-        let ptr1 = arena.alloc(1, "one".to_string(), 111, Ptr::null(), Ptr::null());
-        let ptr2 = arena.alloc(2, "two".to_string(), 222, Ptr::null(), Ptr::null());
+        let ptr = arena.alloc_circular(42, "test".to_string());
 
-        *arena.links_mut(ptr1).next_mut() = ptr2;
-        *arena.links_mut(ptr2).prev_mut() = ptr1;
-
-        let cloned_arena = arena.clone();
-
-        assert_eq!(cloned_arena.nodes.len(), arena.nodes.len());
-        assert_eq!(cloned_arena.free_head, arena.free_head);
-
-        assert_eq!(cloned_arena[ptr1].key, arena[ptr1].key);
-        assert_eq!(cloned_arena[ptr1].value, arena[ptr1].value);
-        assert_eq!(cloned_arena[ptr2].key, arena[ptr2].key);
-        assert_eq!(cloned_arena[ptr2].value, arena[ptr2].value);
-
-        assert_eq!(cloned_arena.links(ptr1).next(), ptr2);
-        assert_eq!(cloned_arena.links(ptr2).prev(), ptr1);
+        unsafe {
+            let slot = ptr.as_ref();
+            let this_ptr = slot.this;
+            arena.free_and_unlink(ptr);
+            let _ = &mut arena[this_ptr];
+        }
     }
 
     #[test]
-    fn test_arena_clone_with_free_slots() {
+    fn test_arena_mixed_alloc_patterns() {
         let mut arena = Arena::new();
-        let ptr1 = arena.alloc(1, "one".to_string(), 111, Ptr::null(), Ptr::null());
-        let ptr2 = arena.alloc(2, "two".to_string(), 222, Ptr::null(), Ptr::null());
-        let ptr3 = arena.alloc(3, "three".to_string(), 333, Ptr::null(), Ptr::null());
+        let ptr1 = arena.alloc_circular(1, "first".to_string());
 
-        arena.free(ptr2);
+        unsafe {
+            let ptr2 = arena.alloc(2, "second".to_string(), ptr1, ptr1);
+            let ptr3 = arena.alloc(3, "third".to_string(), ptr2, ptr1);
 
-        let cloned_arena = arena.clone();
+            assert_eq!(arena[ptr1.as_ref().this].key, 1);
+            assert_eq!(arena[ptr2.as_ref().this].key, 2);
+            assert_eq!(arena[ptr3.as_ref().this].key, 3);
 
-        assert!(cloned_arena.is_occupied(ptr1));
-        assert!(!cloned_arena.is_occupied(ptr2));
-        assert!(cloned_arena.is_occupied(ptr3));
-
-        assert_eq!(cloned_arena.free_head, arena.free_head);
+            assert_eq!(
+                ptr2.as_ref().links,
+                Links::Active {
+                    prev: ptr1,
+                    next: ptr1
+                }
+            );
+            assert_eq!(
+                ptr3.as_ref().links,
+                Links::Active {
+                    prev: ptr2,
+                    next: ptr1
+                }
+            );
+        }
     }
 
     #[test]
-    #[should_panic]
-    fn test_arena_index_unoccupied_ptr() {
+    fn test_arena_free_list_order() {
         let mut arena = Arena::new();
-        let ptr = arena.alloc(1, "one".to_string(), 111, Ptr::null(), Ptr::null());
-        arena.free(ptr);
-        let _ = &arena[ptr];
+        let ptr1 = arena.alloc_circular(1, "first".to_string());
+        let ptr2 = arena.alloc_circular(2, "second".to_string());
+        let ptr3 = arena.alloc_circular(3, "third".to_string());
+
+        unsafe {
+            let this1 = ptr1.as_ref().this;
+            let this2 = ptr2.as_ref().this;
+            let this3 = ptr3.as_ref().this;
+
+            arena.free_and_unlink(ptr1);
+            arena.free_and_unlink(ptr2);
+            arena.free_and_unlink(ptr3);
+
+            let new_ptr3 = arena.alloc_circular(30, "new_third".to_string());
+            let new_ptr2 = arena.alloc_circular(20, "new_second".to_string());
+            let new_ptr1 = arena.alloc_circular(10, "new_first".to_string());
+
+            assert_eq!(new_ptr3.as_ref().this, this3);
+            assert_eq!(new_ptr2.as_ref().this, this2);
+            assert_eq!(new_ptr1.as_ref().this, this1);
+
+            assert_eq!(arena[this3].key, 30);
+            assert_eq!(arena[this2].key, 20);
+            assert_eq!(arena[this1].key, 10);
+        }
     }
 
     #[test]
-    #[should_panic]
-    fn test_arena_index_mut_unoccupied_ptr() {
+    fn test_arena_zero_capacity() {
+        let arena: Arena<i32, String> = Arena::with_capacity(0);
+        assert!(!arena.is_occupied(Ptr::unchecked_from(0)));
+    }
+
+    #[test]
+    fn test_arena_map_ptr_after_free() {
         let mut arena = Arena::new();
-        let ptr = arena.alloc(1, "one".to_string(), 111, Ptr::null(), Ptr::null());
-        arena.free(ptr);
-        let _ = &mut arena[ptr];
+        let ptr = arena.alloc_circular(42, "test".to_string());
+
+        unsafe {
+            let slot = ptr.as_ref();
+            let this_ptr = slot.this;
+
+            assert!(arena.map_ptr(this_ptr).is_some());
+            arena.free_and_unlink(ptr);
+            assert!(arena.map_ptr(this_ptr).is_none());
+        }
     }
 
     #[test]
-    #[should_panic]
-    fn test_arena_free_unoccupied_ptr() {
+    fn test_arena_alloc_with_different_prev_next() {
         let mut arena = Arena::new();
-        let ptr = arena.alloc(1, "one".to_string(), 111, Ptr::null(), Ptr::null());
-        arena.free(ptr);
-        arena.free(ptr);
-    }
+        let ptr1 = arena.alloc_circular(1, "first".to_string());
+        let ptr2 = arena.alloc_circular(2, "second".to_string());
 
-    #[test]
-    #[should_panic]
-    fn test_arena_free_null_ptr() {
-        let mut arena = Arena::<i32, i32>::new();
-        arena.free(Ptr::null());
-    }
+        unsafe {
+            let ptr3 = arena.alloc(3, "third".to_string(), ptr1, ptr2);
 
-    #[test]
-    fn test_arena_is_occupied_null_ptr() {
-        let arena: Arena<i32, Vec<i32>> = Arena::new();
-        assert!(!arena.is_occupied(Ptr::null()));
-    }
-
-    #[test]
-    fn test_niche_optimization() {
-        use core::mem::size_of;
-        assert_eq!(
-            size_of::<DataOrFree<Vec<i32>, Vec<i32>>>(),
-            size_of::<LLData<Vec<i32>, Vec<i32>>>()
-        );
-        assert_eq!(
-            size_of::<LLSlot<Vec<i32>, Vec<i32>>>(),
-            size_of::<(Ptr, Ptr, LLData<Vec<i32>, Vec<i32>>)>()
-        );
+            assert_eq!(
+                ptr3.as_ref().links,
+                Links::Active {
+                    prev: ptr1,
+                    next: ptr2
+                }
+            );
+        }
     }
 }

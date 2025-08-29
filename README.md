@@ -30,10 +30,3 @@ map.move_to_head(ptr);
 let keys: Vec<_> = map.iter().map(|(k, _)| *k).collect();
 assert_eq!(keys, ["second", "zeroth", "first"]);
 ```
-
-## Usage of Unsafe
-There is a small amount of unsafe code used to implement `IterMut`, which is only enabled when the
-`iter-mut` feature is activated (enabled by default). The unsafe code is carefully reviewed to
-ensure safety and is checked with miri. If you don't need `IterMut`, you can disable it, and the
-crate will turn on `#[forbid(unsafe_code)]` to ensure no unsafe code is present. You can see this
-behavior in `lib.rs`.

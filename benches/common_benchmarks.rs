@@ -1,11 +1,9 @@
 use std::hint::black_box;
 
-use criterion::{
-    BenchmarkId,
-    Criterion,
-    criterion_group,
-    criterion_main,
-};
+use criterion::BenchmarkId;
+use criterion::Criterion;
+use criterion::criterion_group;
+use criterion::criterion_main;
 type RandomState = hashbrown::DefaultHashBuilder;
 type TetherMap<K, V> = tether_map::linked_hash_map::LinkedHashMap<K, V, RandomState>;
 
@@ -18,6 +16,8 @@ fn bench_insertion_at_end(c: &mut Criterion) {
     let mut group = c.benchmark_group("insertion_at_end");
 
     for &size in SIZES {
+        group.throughput(criterion::Throughput::Elements(size as u64));
+
         group.bench_with_input(BenchmarkId::new("tether_map", size), &size, |b, &size| {
             b.iter(|| {
                 let mut map: TetherMap<usize, usize> = TetherMap::default();
@@ -85,6 +85,8 @@ fn bench_pop_from_end(c: &mut Criterion) {
     let mut group = c.benchmark_group("pop_from_end");
 
     for &size in SIZES {
+        group.throughput(criterion::Throughput::Elements(size as u64));
+
         group.bench_with_input(BenchmarkId::new("tether_map", size), &size, |b, &size| {
             b.iter_batched(
                 || {
@@ -97,7 +99,7 @@ fn bench_pop_from_end(c: &mut Criterion) {
                 |mut map| {
                     let mut count = 0;
                     while !map.is_empty() {
-                        map.remove_ptr(map.tail_ptr());
+                        map.remove_tail();
                         count += 1;
                     }
                     count
@@ -105,6 +107,31 @@ fn bench_pop_from_end(c: &mut Criterion) {
                 criterion::BatchSize::SmallInput,
             )
         });
+
+        group.bench_with_input(
+            BenchmarkId::new("tether_map_remove_ptr", size),
+            &size,
+            |b, &size| {
+                b.iter_batched(
+                    || {
+                        let mut map = TetherMap::default();
+                        for i in 0..size {
+                            map.insert_tail_full(i, i * 2);
+                        }
+                        map
+                    },
+                    |mut map| {
+                        let mut count = 0;
+                        while !map.is_empty() {
+                            map.remove_ptr(map.tail_ptr().unwrap());
+                            count += 1;
+                        }
+                        count
+                    },
+                    criterion::BatchSize::SmallInput,
+                )
+            },
+        );
 
         group.bench_with_input(BenchmarkId::new("indexmap", size), &size, |b, &size| {
             b.iter_batched(
@@ -156,7 +183,19 @@ fn bench_remove_from_middle(c: &mut Criterion) {
     let mut group = c.benchmark_group("remove_from_middle");
 
     for &size in SIZES {
-        let middle_keys: Vec<usize> = (0..size).step_by(size / 10).collect();
+        let mut next_down = size / 2;
+        let mut next_up = size / 2 + 1;
+        let mut middle_keys = Vec::with_capacity(size);
+        for _ in 0..size / 2 {
+            middle_keys.push(next_down);
+            middle_keys.push(next_up);
+            next_down = next_down.saturating_sub(1);
+            if next_up < size - 1 {
+                next_up += 1;
+            }
+        }
+
+        group.throughput(criterion::Throughput::Elements(middle_keys.len() as u64));
 
         group.bench_with_input(BenchmarkId::new("tether_map", size), &size, |b, &size| {
             b.iter_batched(
@@ -177,27 +216,8 @@ fn bench_remove_from_middle(c: &mut Criterion) {
             )
         });
 
-        group.bench_with_input(BenchmarkId::new("indexmap", size), &size, |b, &size| {
-            b.iter_batched(
-                || {
-                    let mut map = IndexMap::default();
-                    for i in 0..size {
-                        map.insert(i, i * 2);
-                    }
-                    map
-                },
-                |mut map| {
-                    for &key in &middle_keys {
-                        map.swap_remove(&black_box(key));
-                    }
-                    map
-                },
-                criterion::BatchSize::SmallInput,
-            )
-        });
-
         group.bench_with_input(
-            BenchmarkId::new("indexmap_shift_remove", size),
+            BenchmarkId::new("indexmap_swap_remove", size),
             &size,
             |b, &size| {
                 b.iter_batched(
@@ -210,9 +230,7 @@ fn bench_remove_from_middle(c: &mut Criterion) {
                     },
                     |mut map| {
                         for &key in &middle_keys {
-                            if let Some(index) = map.get_index_of(&black_box(key)) {
-                                map.shift_remove_index(index);
-                            }
+                            map.swap_remove(&black_box(key));
                         }
                         map
                     },
@@ -248,25 +266,24 @@ fn bench_insert_in_middle(c: &mut Criterion) {
     let mut group = c.benchmark_group("insert_in_middle");
 
     for &size in SIZES {
+        group.throughput(criterion::Throughput::Elements(size as u64));
+
         group.bench_with_input(BenchmarkId::new("tether_map", size), &size, |b, &size| {
             b.iter_batched(
                 || {
+                    let mut ptrs = Vec::with_capacity(size);
                     let mut map = TetherMap::default();
                     for i in 0..size {
-                        map.insert_tail(i * 2, (i * 2) * 2);
+                        let (ptr, _) = map.insert_tail_full(i * 2, (i * 2) * 2);
+                        ptrs.push(ptr);
                     }
-                    map
+                    (ptrs, map)
                 },
-                |mut map| {
-                    for i in 0..size {
+                |(ptrs, mut map)| {
+                    for (i, ptr) in ptrs.into_iter().enumerate() {
                         let key = i * 2 + 1;
-                        let target_key = i * 2;
-                        if let Some(ptr) = map.get_ptr(&target_key) {
-                            let mut cursor = map.ptr_cursor_mut(ptr);
-                            cursor.insert_after_move_to(black_box(key), black_box(key * 2));
-                        } else {
-                            map.insert_tail(black_box(key), black_box(key * 2));
-                        }
+                        let mut cursor = map.ptr_cursor_mut(ptr);
+                        cursor.insert_after_move_to(black_box(key), black_box(key * 2));
                     }
                     map
                 },
@@ -303,9 +320,9 @@ fn bench_random_access_full(c: &mut Criterion) {
     let mut group = c.benchmark_group("random_access_full");
 
     for &size in SIZES {
-        let access_keys: Vec<usize> = (0..100.min(size))
-            .map(|_| rand::random_range(0..size))
-            .collect();
+        let access_keys: Vec<usize> = (0..100).map(|_| rand::random_range(0..size)).collect();
+
+        group.throughput(criterion::Throughput::Elements(access_keys.len() as u64));
 
         group.bench_with_input(BenchmarkId::new("tether_map", size), &size, |b, &size| {
             let mut map = TetherMap::default();
@@ -367,6 +384,8 @@ fn bench_random_access_sparse(c: &mut Criterion) {
 
     for &size in SIZES {
         let access_keys: Vec<usize> = (0..100).map(|_| rand::random_range(0..size)).collect();
+
+        group.throughput(criterion::Throughput::Elements(access_keys.len() as u64));
 
         group.bench_with_input(BenchmarkId::new("tether_map", size), &size, |b, &size| {
             let mut map = TetherMap::default();
@@ -437,6 +456,8 @@ fn bench_iteration_full(c: &mut Criterion) {
     let mut group = c.benchmark_group("iteration_full");
 
     for &size in SIZES {
+        group.throughput(criterion::Throughput::Elements(size as u64));
+
         group.bench_with_input(BenchmarkId::new("tether_map", size), &size, |b, &size| {
             let mut map = TetherMap::default();
             for i in 0..size {
@@ -490,6 +511,8 @@ fn bench_iteration_sparse(c: &mut Criterion) {
     let mut group = c.benchmark_group("iteration_sparse");
 
     for &size in SIZES {
+        group.throughput(criterion::Throughput::Elements(size as u64 / 3));
+
         group.bench_with_input(BenchmarkId::new("tether_map", size), &size, |b, &size| {
             let mut map = TetherMap::default();
             for i in 0..size {
