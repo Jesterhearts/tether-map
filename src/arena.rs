@@ -1,3 +1,13 @@
+//! Internal arena for intrusive linked-list nodes.
+//!
+//! This module provides bump-allocated storage (`Arena`) for `LLSlot<K, T>`
+//! nodes used by the linked hash map. It owns allocation, free-list reuse, and
+//! raw pointer mapping from the public `Ptr` handle. Higher-level list
+//! invariants (ordering, re-linking) are enforced in `linked_hash_map`.
+//!
+//! Safety: Methods that return or accept raw `NonNull<LLSlot<_, _>>` require
+//! callers to uphold "occupied node" preconditions. See inline docs for each
+//! unsafe function for details.
 use alloc::vec::Vec;
 use core::clone::Clone;
 use core::fmt::Debug;

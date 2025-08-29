@@ -1197,6 +1197,13 @@ impl<K, T, S> IntoIterator for LinkedHashMap<K, T, S> {
 
 impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// Shrinks the capacity of the map as much as possible.
+    ///
+    /// This will drop down the number of buckets in the underlying hash table
+    /// as much as possible while maintaining the current number of elements.
+    ///
+    /// It does not affect the capacity of the arena used for storing entries,
+    /// as it's not possible to safely shrink that without risking invalidating
+    /// existing pointers.
     pub fn shrink_to_fit(&mut self) {
         self.table.shrink_to_fit(|k| {
             // SAFETY: We only store valid pointers into our own arena
