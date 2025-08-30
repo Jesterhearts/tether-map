@@ -1,5 +1,9 @@
 # tether-map
 
+[![Crates.io](https://img.shields.io/crates/v/tether-map.svg?style=for-the-badge)](https://crates.io/crates/tether-map)
+[![Docs.rs](https://img.shields.io/docsrs/tether-map/latest?style=for-the-badge)](https://docs.rs/tether-map)
+[![Dependency status](https://deps.rs/repo/github/jesterhearts/tether-map/status.svg?style=for-the-badge)](https://deps.rs/repo/github/jesterhearts/tether-map)
+
 An order-preserving hash map built on an intrusive doubly‑linked list with O(1) reordering.
 
 - O(1) insert, remove, and lookup by key
