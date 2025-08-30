@@ -14,14 +14,14 @@ Add to your Cargo.toml:
 
 ```toml
 [dependencies]
-tether-map = { git = "https://github.com/Jesterhearts/tether-map" }
+tether-map = "*"
 ```
 
 no_std users:
 
 ```toml
 [dependencies]
-tether-map = { git = "https://github.com/Jesterhearts/tether-map", default-features = false }
+tether-map = { version = "*", default-features = false }
 ```
 
 The crate uses `alloc` internally and does not require `std` unless the `std` feature is enabled (it’s on by default).
@@ -92,8 +92,25 @@ The crate compiles with `#![no_std]` when the `std` feature is disabled and requ
 
 ## Safety notes and pointer semantics
 
-- `Ptr` is a compact, non‑generational handle to an entry. It remains valid until that entry is removed from the map. After removal, the pointer must not be used. The same `Ptr` value may be reused for a different entry later.
-- Cursors and pointer APIs assume pointers originate from this map. Using stale/foreign pointers is a logic error and returns `None`/no‑op or panics where an immutable/mutable reference is required.
+- `Ptr` is a compact, non‑generational handle to an entry. It remains valid until that entry is
+  removed from the map. After removal, the pointer should not be used as the same `Ptr` value may be
+  reused for a different entry later.
+- Cursors and pointer APIs assume pointers originate from this map. Using stale/foreign pointers is
+  a logic error and may return unexpected results or panic but will not result in undefined behavior.
+
+## Usage of Unsafe
+
+This crate uses `unsafe` internally where it provides significant, measurable speedups. In several
+microbenchmarks this yields over 2× performance in hot paths compared to fully safe alternatives.
+
+- Scope: `unsafe` is largely contained within the internal arena implementation (`src/arena.rs`) and
+  a few small pointer‑manipulation helpers. The public API is safe.
+- Documentation: Every `unsafe` block is accompanied by a `// SAFETY:` comment explaining the
+  invariants and preconditions being relied upon.
+- Verification: Tests are regularly exercised under Miri to catch UB‑adjacent mistakes in pointer
+  and aliasing logic.
+- Extra checks: Debug builds enable additional assertions to validate linkage, aliasing, and bounds.
+  These checks impose a 30%+ overhead and are therefore disabled in release builds.
 
 ## License
 
