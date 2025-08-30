@@ -5,12 +5,6 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "A no-std compatible linked hashmap implementation."
 repository = "https://github.com/Jesterhearts/tether-map"
-categories = [
-    "data-structures",
-    "hashmap",
-    "no-std",
-    "linked-list",
-]
 keywords = [
     "data-structures",
     "hashmap",
