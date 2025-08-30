@@ -7,24 +7,30 @@ An order-preserving hash map built on an intrusive doubly‑linked list with O(1
 - O(1) reordering: move entries to head/tail or before/after any other entry
 - Cursor API for in-place navigation and mutation
 - `no_std` compatible (needs `alloc`)
+ - Safe public API; `unsafe` only in well-audited internals
 
 ## Install
 
-Add to your Cargo.toml:
+Add to your Cargo.toml
 
 ```toml
 [dependencies]
-tether-map = "*"
+tether-map = "0.1"
 ```
 
 no_std users:
 
 ```toml
 [dependencies]
-tether-map = { version = "*", default-features = false }
+tether-map = { version = "0.1", default-features = false }
 ```
 
-The crate uses `alloc` internally and does not require `std` unless the `std` feature is enabled (it’s on by default).
+The crate uses `alloc` internally and does not require `std` unless the `std` feature is enabled
+(enabled by default).
+
+Feature flags:
+
+- `std` (default): Enables std-dependent conveniences like the default hasher and common traits.
 
 ## Quick start
 
@@ -96,6 +102,9 @@ The crate compiles with `#![no_std]` when the `std` feature is disabled and requ
 - Order is maintained via an intrusive doubly‑linked list; the hash table provides lookups.
 - The internal arena reuses freed slots to avoid unnecessary allocations.
 
+Benchmarks: Criterion benchmarks live in `benches/` (with comparisons against `indexmap` and
+`hashlink`). Run them locally with `cargo bench`; a report is written under `target/criterion/`.
+
 ## Safety notes and pointer semantics
 
 - `Ptr` is a compact, non‑generational handle to an entry. It remains valid until that entry is
@@ -107,7 +116,7 @@ The crate compiles with `#![no_std]` when the `std` feature is disabled and requ
 ## Usage of Unsafe
 
 This crate uses `unsafe` internally where it provides significant, measurable speedups. In several
-microbenchmarks this yields over 2× performance in hot paths compared to fully safe alternatives.
+microbenchmarks this yields over 2x performance in hot paths compared to fully safe alternatives.
 
 - Scope: `unsafe` is largely contained within the internal arena implementation (`src/arena.rs`) and
   a few small pointer‑manipulation helpers. The public API is safe.
@@ -115,8 +124,9 @@ microbenchmarks this yields over 2× performance in hot paths compared to fully 
   invariants and preconditions being relied upon.
 - Verification: Tests are regularly exercised under Miri to catch UB‑adjacent mistakes in pointer
   and aliasing logic.
-- Extra checks: Debug builds enable additional assertions to validate linkage, aliasing, and bounds.
-  These checks impose a 30%+ overhead and are therefore disabled in release builds.
+- Extra checks: Debug builds enable additional assertions to validate the source of pointers in
+  order to double check lifetime management. These checks impose a 30%+ overhead and are therefore
+  disabled in release builds.
 
 ## License
 

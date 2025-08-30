@@ -3,13 +3,14 @@ name = "tether-map"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "A no-std compatible linked hashmap implementation."
+description = "Order-preserving linked hash map with O(1) reordering; no_std-compatible (alloc)."
 repository = "https://github.com/Jesterhearts/tether-map"
 keywords = [
     "data-structures",
     "hashmap",
-    "no-std",
+    "order-preserving",
     "linked-list",
+    "no-std",
 ]
 readme = "README.md"
 

@@ -460,8 +460,13 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// Links an entry as the new head of the linked list.
     ///
     /// The entry at `ptr` must already exist in the map but not be part of the
-    /// linked list. This is typically used when inserting a new entry at
-    /// the head position.
+    /// linked list.
+    ///
+    /// This is a low-level method intended for advanced use cases with entries
+    /// that have been inserted in an unlinked state. Using this with already
+    /// linked entries may screw up the list, causing issues during iteration or
+    /// other operations. It will not cause undefined behavior, but it may lead
+    /// to logical errors.
     ///
     /// # Arguments
     ///
@@ -484,8 +489,13 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// Links an entry as the new tail of the linked list.
     ///
     /// The entry at `ptr` must already exist in the map but not be part of the
-    /// linked list. This is typically used when inserting a new entry at
-    /// the tail position.
+    /// linked list.
+    ///
+    /// This is a low-level method intended for advanced use cases with entries
+    /// that have been inserted in an unlinked state. Using this with already
+    /// linked entries may screw up the list, causing issues during iteration or
+    /// other operations. It will not cause undefined behavior, but it may lead
+    /// to logical errors.
     ///
     /// # Arguments
     ///
@@ -507,6 +517,12 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
 
     /// Links an entry into the doubly-linked list at a specific position after
     /// another entry.
+    ///
+    /// This is a low-level method intended for advanced use cases with entries
+    /// that have been inserted in an unlinked state. Using this with already
+    /// linked entries may screw up the list, causing issues during iteration or
+    /// other operations. It will not cause undefined behavior, but it may lead
+    /// to logical errors.
     pub fn link_after(&mut self, ptr: Ptr, prev: Ptr) -> Option<()> {
         let node = self.nodes.map_ptr(ptr)?;
         let prev = self.nodes.map_ptr(prev);
@@ -515,6 +531,12 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
 
     /// Links an entry into the doubly-linked list at a specific position before
     /// another entry.
+    ///
+    /// This is a low-level method intended for advanced use cases with entries
+    /// that have been inserted in an unlinked state. Using this with already
+    /// linked entries may screw up the list, causing issues during iteration or
+    /// other operations. It will not cause undefined behavior, but it may lead
+    /// to logical errors.
     pub fn link_before(&mut self, ptr: Ptr, next: Ptr) -> Option<()> {
         let node = self.nodes.map_ptr(ptr)?;
         let next = self.nodes.map_ptr(next);
@@ -2794,7 +2816,7 @@ impl<'a, K: Hash + Eq, T> VacantEntry<'a, K, T> {
     /// including the new entry in the list yet. In that case, you can create
     /// the entry with `push_unlinked()` and then later link it in using
     /// methods like `link_as_head()`, or `link_as_tail()`.
-    pub fn push_unlinked(self, value: T) -> (Ptr, &'a mut T) {
+    pub fn insert_unlinked(self, value: T) -> (Ptr, &'a mut T) {
         let mut ptr = self.nodes.alloc_circular(self.key, value);
         self.entry.insert(ptr);
         (ptr.this(self.nodes), &mut ptr.data_mut(self.nodes).value)
@@ -5025,7 +5047,7 @@ mod tests {
         let mut map = LinkedHashMap::default();
 
         let ptr_x = match map.entry("x") {
-            Entry::Vacant(v) => v.push_unlinked(10).0,
+            Entry::Vacant(v) => v.insert_unlinked(10).0,
             _ => unreachable!(),
         };
 
@@ -5041,7 +5063,7 @@ mod tests {
         assert_eq!(items, vec![(&"x", &10)]);
 
         let ptr_y = match map.entry("y") {
-            Entry::Vacant(v) => v.push_unlinked(20).0,
+            Entry::Vacant(v) => v.insert_unlinked(20).0,
             _ => unreachable!(),
         };
         assert!(map.link_as_tail(ptr_y).is_some());
@@ -5058,7 +5080,7 @@ mod tests {
         let (_ptr_c, _) = map.insert_tail_full("c", 3);
 
         let ptr_b = match map.entry("b") {
-            Entry::Vacant(v) => v.push_unlinked(2).0,
+            Entry::Vacant(v) => v.insert_unlinked(2).0,
             _ => unreachable!(),
         };
         assert!(map.link_after(ptr_b, ptr_a).is_some());
@@ -5066,7 +5088,7 @@ mod tests {
         assert_eq!(keys, vec!["a", "b", "c"]);
 
         let ptr_0 = match map.entry("0") {
-            Entry::Vacant(v) => v.push_unlinked(0).0,
+            Entry::Vacant(v) => v.insert_unlinked(0).0,
             _ => unreachable!(),
         };
         assert!(map.link_before(ptr_0, map.head_ptr().unwrap()).is_some());
