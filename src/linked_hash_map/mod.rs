@@ -163,7 +163,6 @@ impl<K: core::fmt::Debug, T: core::fmt::Debug, S> core::fmt::Debug for LinkedHas
         let mut entries = Vec::with_capacity(self.len());
 
         for ptr in self.table.iter() {
-            // SAFETY: All pointers come from our own arena
             let next = ptr.next(&self.nodes);
             let prev = ptr.prev(&self.nodes);
             prevnext.push((prev, next));
@@ -182,7 +181,6 @@ impl<K: core::fmt::Debug, T: core::fmt::Debug, S> core::fmt::Debug for LinkedHas
             });
         }
 
-        // SAFETY: head & tail are valid pointers into our own arena.
         f.debug_struct("LinkedHashMap")
             .field("len", &self.len())
             .field("head", &self.head_tail.as_ref().map(|ht| &ht.head))
@@ -195,6 +193,7 @@ impl<K: core::fmt::Debug, T: core::fmt::Debug, S> core::fmt::Debug for LinkedHas
 }
 
 impl<K, T, S: BuildHasher + Default> Default for LinkedHashMap<K, T, S> {
+    #[inline]
     fn default() -> Self {
         LinkedHashMap::with_capacity_and_hasher(0, S::default())
     }
@@ -214,6 +213,7 @@ impl<K, T> LinkedHashMap<K, T> {
     /// let mut map: LinkedHashMap<&str, i32> = LinkedHashMap::with_capacity(10);
     /// assert_eq!(map.len(), 0);
     /// ```
+    #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         Self::with_capacity_and_hasher(capacity, RandomState::default())
     }
@@ -233,6 +233,7 @@ impl<K, T> LinkedHashMap<K, T> {
     /// map.insert("key", 42);
     /// assert!(!map.is_empty());
     /// ```
+    #[inline]
     pub fn new() -> Self {
         Self::with_capacity(0)
     }
@@ -254,6 +255,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// let mut map: LinkedHashMap<&str, i32, _> = LinkedHashMap::with_capacity_and_hasher(10, hasher);
     /// map.insert("key", 42);
     /// ```
+    #[inline]
     pub fn with_capacity_and_hasher(capacity: usize, hasher: S) -> Self {
         LinkedHashMap {
             head_tail: None,
@@ -549,8 +551,6 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     pub fn link_before(&mut self, ptr: Ptr, next: Ptr) -> Option<()> {
         let node = self.nodes.map_ptr(ptr)?;
         let next = self.nodes.map_ptr(next);
-        // SAFETY: ptr is occupied and non-null per the above checks. If next is
-        // non-null, it must also be occupied since it came from our own arena.
         self.link_node_internal(node, None, next, true)
     }
 
@@ -634,6 +634,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// let entries: Vec<_> = map.iter().collect();
     /// assert_eq!(entries, [(&"b", &2), (&"c", &3), (&"a", &1)]);
     /// ```
+    #[inline]
     pub fn move_to_tail(&mut self, moved: Ptr) -> Option<()> {
         self.move_after(moved, self.tail_ptr()?)
     }
@@ -669,6 +670,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// let entries: Vec<_> = map.iter().collect();
     /// assert_eq!(entries, [(&"c", &3), (&"a", &1), (&"b", &2)]);
     /// ```
+    #[inline]
     pub fn move_to_head(&mut self, moved: Ptr) -> Option<()> {
         self.move_before(moved, self.head_ptr()?)
     }
@@ -700,6 +702,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     ///     *value = 42;
     /// }
     /// ```
+    #[inline]
     pub fn ptr_cursor_mut(&'_ mut self, ptr: Ptr) -> CursorMut<'_, K, T, S> {
         let ptr = self.nodes.map_ptr(ptr);
         CursorMut { ptr, map: self }
@@ -729,6 +732,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// let next = map.next_ptr(ptr1).unwrap();
     /// assert_eq!(map.ptr_get(next), Some(&2));
     /// ```
+    #[inline]
     pub fn next_ptr(&self, ptr: Ptr) -> Option<Ptr> {
         let ptr = self.nodes.map_ptr(ptr)?;
         Some(ptr.next(&self.nodes).this(&self.nodes))
@@ -758,6 +762,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// let prev = map.prev_ptr(ptr2).unwrap();
     /// assert_eq!(map.ptr_get(prev), Some(&1));
     /// ```
+    #[inline]
     pub fn prev_ptr(&self, ptr: Ptr) -> Option<Ptr> {
         let ptr = self.nodes.map_ptr(ptr)?;
         Some(ptr.prev(&self.nodes).this(&self.nodes))
@@ -786,6 +791,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     ///     *value = 42;
     /// }
     /// ```
+    #[inline]
     pub fn head_cursor_mut(&'_ mut self) -> CursorMut<'_, K, T, S> {
         CursorMut {
             ptr: self.head_tail.as_ref().map(|ht| ht.head),
@@ -816,6 +822,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     ///     *value = 42;
     /// }
     /// ```
+    #[inline]
     pub fn tail_cursor_mut(&'_ mut self) -> CursorMut<'_, K, T, S> {
         CursorMut {
             ptr: self.head_tail.as_ref().map(|ht| ht.tail),
@@ -824,23 +831,26 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     }
 
     /// Returns the pointer to the head (first entry) of the linked list.
+    #[inline]
     pub fn head_ptr(&self) -> Option<Ptr> {
         self.head_tail.as_ref().map(|ht| ht.head.this(&self.nodes))
     }
 
     /// Returns the pointer to the tail (last entry) of the linked list.
+    #[inline]
     pub fn tail_ptr(&self) -> Option<Ptr> {
         self.head_tail.as_ref().map(|ht| ht.tail.this(&self.nodes))
     }
 
     /// Returns a reference to the value associated with the given pointer.
+    #[inline]
     pub fn ptr_get(&self, ptr: Ptr) -> Option<&T> {
-        // SAFETY: We just retrieved the pointer from our own arena.
         self.nodes.map_ptr(ptr).map(|p| &p.data(&self.nodes).value)
     }
 
     /// Returns a reference to the key-value pair associated with the given
     /// pointer.
+    #[inline]
     pub fn ptr_get_entry(&self, ptr: Ptr) -> Option<(&K, &T)> {
         self.nodes.map_ptr(ptr).map(|p| {
             let data = p.data(&self.nodes);
@@ -850,6 +860,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
 
     /// Returns a mutable reference to the key-value pair associated with the
     /// given pointer.
+    #[inline]
     pub fn ptr_get_entry_mut(&mut self, ptr: Ptr) -> Option<(&K, &mut T)> {
         self.nodes.map_ptr(ptr).map(|mut p| {
             let data = p.data_mut(&mut self.nodes);
@@ -859,6 +870,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
 
     /// Returns a mutable reference to the value associated with the given
     /// pointer.
+    #[inline]
     pub fn ptr_get_mut(&mut self, ptr: Ptr) -> Option<&mut T> {
         self.nodes
             .map_ptr(ptr)
@@ -866,8 +878,8 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     }
 
     /// Returns a reference to the key associated with the given pointer.
+    #[inline]
     pub fn ptr_get_key(&self, ptr: Ptr) -> Option<&K> {
-        // SAFETY: We just retrieved the pointer from our own arena.
         self.nodes.map_ptr(ptr).map(|p| &p.data(&self.nodes).key)
     }
 
@@ -883,6 +895,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// a.insert(1, "a");
     /// assert_eq!(a.len(), 1);
     /// ```
+    #[inline]
     pub fn len(&self) -> usize {
         self.table.len()
     }
@@ -899,6 +912,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// a.insert(1, "a");
     /// assert!(!a.is_empty());
     /// ```
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -946,6 +960,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     ///     println!("key: {} val: {}", key, val);
     /// }
     /// ```
+    #[inline]
     pub fn iter<'s>(&'s self) -> Iter<'s, K, T> {
         Iter {
             forward_ptr: self.head_tail.as_ref().map(|ht| ht.head),
@@ -976,6 +991,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// map.remove_ptr(ptr);
     /// assert!(!map.contains_ptr(ptr));
     /// ```
+    #[inline]
     pub fn contains_ptr(&self, ptr: Ptr) -> bool {
         self.nodes.is_occupied(ptr)
     }
@@ -1002,6 +1018,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// let keys: Vec<_> = map.keys().collect();
     /// assert_eq!(keys, [&"a", &"b", &"c"]);
     /// ```
+    #[inline]
     pub fn keys(&self) -> impl Iterator<Item = &K> {
         self.iter().map(|(k, _)| k)
     }
@@ -1029,6 +1046,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// let values: Vec<_> = map.values().collect();
     /// assert_eq!(values, [&1, &2, &3]);
     /// ```
+    #[inline]
     pub fn values(&self) -> impl Iterator<Item = &T> {
         self.iter().map(|(_, v)| v)
     }
@@ -1062,6 +1080,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// let values: Vec<_> = map.values().collect();
     /// assert_eq!(values, [&2, &4, &6]);
     /// ```
+    #[inline]
     pub fn values_mut<'s>(&'s mut self) -> ValuesMut<'s, K, T> {
         ValuesMut {
             iter: self.iter_mut(),
@@ -1098,6 +1117,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     ///
     /// assert_eq!(map.get(&"b"), Some(&20));
     /// ```
+    #[inline]
     pub fn iter_mut<'s>(&'s mut self) -> IterMut<'s, K, T> {
         IterMut {
             forward_ptr: self.head_tail.as_ref().map(|ht| ht.head),
@@ -1172,6 +1192,7 @@ impl<K, T, S> IntoIterator for LinkedHashMap<K, T, S> {
     type IntoIter = IntoIter<K, T>;
     type Item = (K, T);
 
+    #[inline]
     fn into_iter(self) -> Self::IntoIter {
         IntoIter {
             nodes: self.nodes,
@@ -1199,6 +1220,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     ///
     /// This is equivalent to calling `remove_ptr(tail_ptr())`, but is more
     /// performant.
+    #[inline]
     pub fn remove_tail(&mut self) -> Option<(Ptr, RemovedEntry<K, T>)> {
         let ptr = self.head_tail.as_ref().map(|ht| ht.tail)?;
 
@@ -1209,6 +1231,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     ///
     /// This is equivalent to calling `remove_ptr(head_ptr())`, but is more
     /// performant.
+    #[inline]
     pub fn remove_head(&mut self) -> Option<(Ptr, RemovedEntry<K, T>)> {
         let ptr = self.head_tail.as_ref().map(|ht| ht.head)?;
         Some(self.remove_ptr_internal(ptr))
@@ -1219,6 +1242,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// If the pointer is invalid or does not correspond to an occupied entry,
     /// returns `None`. Otherwise, removes the entry and returns a
     /// `RemovedEntry` containing the key, value, and neighboring pointers.
+    #[inline]
     pub fn remove_ptr(&mut self, ptr: Ptr) -> Option<RemovedEntry<K, T>> {
         let ptr = self.nodes.map_ptr(ptr)?;
 
@@ -1646,9 +1670,9 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     ///     *value = 42;
     /// }
     /// ```
+    #[inline]
     pub fn key_cursor_mut(&'_ mut self, key: &K) -> CursorMut<'_, K, T, S> {
         let hash = self.hasher.hash_one(key);
-        // SAFETY: We only store valid pointers into our own arena
         let ptr = self
             .table
             .find(hash, |k| &k.data(&self.nodes).key == key)
@@ -1703,6 +1727,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     ///     Entry::Vacant(entry) => *entry.insert_tail(1).1,
     /// };
     /// ```
+    #[inline]
     pub fn entry(&'_ mut self, key: K) -> Entry<'_, K, T> {
         let hash = self.hasher.hash_one(&key);
         match self.table.entry(
@@ -1737,6 +1762,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// assert_eq!(map.remove(&1), Some("a"));
     /// assert_eq!(map.remove(&1), None);
     /// ```
+    #[inline]
     pub fn remove(&mut self, key: &K) -> Option<T> {
         self.remove_entry(key).map(|(_, v)| v)
     }
@@ -1754,6 +1780,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// assert_eq!(map.remove_entry(&1), Some((1, "a")));
     /// assert_eq!(map.remove(&1), None);
     /// ```
+    #[inline]
     pub fn remove_entry(&mut self, key: &K) -> Option<(K, T)> {
         let (_, removed) = self.remove_full(key)?;
         Some((removed.key, removed.value))
@@ -1880,6 +1907,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// // Non-existent key returns None
     /// assert_eq!(map.get_ptr(&"missing"), None);
     /// ```
+    #[inline]
     pub fn get_ptr(&self, key: &K) -> Option<Ptr> {
         let hash = self.hasher.hash_one(key);
         self.table
@@ -1902,6 +1930,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// assert_eq!(map.get(&1), Some(&"a"));
     /// assert_eq!(map.get(&2), None);
     /// ```
+    #[inline]
     pub fn get(&self, key: &K) -> Option<&T> {
         self.table
             .find(self.hasher.hash_one(key), |k| {
@@ -1927,6 +1956,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// }
     /// assert_eq!(map.get(&1), Some(&"b"));
     /// ```
+    #[inline]
     pub fn get_mut(&mut self, key: &K) -> Option<&mut T> {
         self.table
             .find_mut(self.hasher.hash_one(key), |k| {
@@ -1950,6 +1980,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// assert_eq!(map.contains_key(&1), true);
     /// assert_eq!(map.contains_key(&2), false);
     /// ```
+    #[inline]
     pub fn contains_key(&self, key: &K) -> bool {
         self.get_ptr(key).is_some()
     }
@@ -1962,6 +1993,7 @@ where
 {
     type Output = T;
 
+    #[inline]
     fn index(&self, key: &K) -> &Self::Output {
         self.get(key).expect("no entry found for key")
     }
@@ -1972,6 +2004,7 @@ where
     K: Hash + Eq,
     S: BuildHasher,
 {
+    #[inline]
     fn index_mut(&mut self, key: &K) -> &mut Self::Output {
         self.get_mut(key).expect("no entry found for key")
     }
@@ -1980,12 +2013,14 @@ where
 impl<K, T, S> Index<Ptr> for LinkedHashMap<K, T, S> {
     type Output = T;
 
+    #[inline]
     fn index(&self, index: Ptr) -> &Self::Output {
         &self.nodes[index].value
     }
 }
 
 impl<K, T, S> IndexMut<Ptr> for LinkedHashMap<K, T, S> {
+    #[inline]
     fn index_mut(&mut self, index: Ptr) -> &mut Self::Output {
         &mut self.nodes[index].value
     }

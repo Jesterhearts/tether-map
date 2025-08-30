@@ -43,6 +43,7 @@ pub struct CursorMut<'m, K, T, S> {
 impl<'m, K: Hash + Eq, T, S: BuildHasher> CursorMut<'m, K, T, S> {
     /// Inserts a key-value pair after the cursor's current position and
     /// moves the cursor to the inserted or updated entry.
+    #[inline]
     pub fn insert_after_move_to(&mut self, key: K, value: T) -> Option<T> {
         let ptr = if self.ptr.is_none() {
             self.map.head_tail.as_ref().map(|ht| ht.tail)
@@ -71,6 +72,7 @@ impl<'m, K: Hash + Eq, T, S: BuildHasher> CursorMut<'m, K, T, S> {
 
     /// Inserts a key-value pair before the cursor's current position and
     /// moves the cursor to the inserted or updated entry.
+    #[inline]
     pub fn insert_before_move_to(&mut self, key: K, value: T) -> Option<T> {
         let ptr = if self.ptr.is_none() {
             self.map.head_tail.as_ref().map(|ht| ht.head)
@@ -110,6 +112,7 @@ impl<'m, K: Hash + Eq, T, S: BuildHasher> CursorMut<'m, K, T, S> {
     ///
     /// * `Some(ptr)` if the key exists in the map
     /// * `None` if the key is not found
+    #[inline]
     pub fn get_ptr(&self, key: &K) -> Option<Ptr> {
         self.map.get_ptr(key)
     }
@@ -117,18 +120,21 @@ impl<'m, K: Hash + Eq, T, S: BuildHasher> CursorMut<'m, K, T, S> {
 
 impl<'m, K: Hash + Eq, T, S: BuildHasher> CursorMut<'m, K, T, S> {
     /// Removes the entry before the cursor's current position and returns it.
+    #[inline]
     pub fn remove_prev(&mut self) -> Option<(Ptr, RemovedEntry<K, T>)> {
         let prev = self.ptr.map(|slot| slot.prev(&self.map.nodes))?;
         Some(self.map.remove_ptr_internal(prev))
     }
 
     /// Removes the entry after the cursor's current position and returns it.
+    #[inline]
     pub fn remove_next(&mut self) -> Option<(Ptr, RemovedEntry<K, T>)> {
         let next = self.ptr.map(|slot| slot.next(&self.map.nodes))?;
         Some(self.map.remove_ptr_internal(next))
     }
 
     /// Removes the entry at the cursor's current position and returns it.
+    #[inline]
     pub fn remove(self) -> Option<(Ptr, RemovedEntry<K, T>)> {
         let ptr = self.ptr?;
         Some(self.map.remove_ptr_internal(ptr))
@@ -137,6 +143,7 @@ impl<'m, K: Hash + Eq, T, S: BuildHasher> CursorMut<'m, K, T, S> {
 
 impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     /// Returns an iterator starting from the cursor's current position.
+    #[inline]
     pub fn iter(&self) -> Iter<'_, K, T> {
         Iter {
             forward_ptr: self.ptr,
@@ -148,6 +155,7 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     /// Moves the cursor to the next entry in the linked list. The internal
     /// linked list is **circular**, so moving next from the tail wraps around
     /// to the head.
+    #[inline]
     pub fn move_next(&mut self) {
         self.ptr = self.ptr.map(|slot| slot.next(&self.map.nodes));
     }
@@ -155,26 +163,31 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     /// Moves the cursor to the previous entry in the linked list. The internal
     /// linked list is **circular**, so moving previous from the head wraps
     /// around to the tail.
+    #[inline]
     pub fn move_prev(&mut self) {
         self.ptr = self.ptr.map(|slot| slot.prev(&self.map.nodes));
     }
 
     /// Gets the current pointer of the cursor.
+    #[inline]
     pub fn ptr(&self) -> Option<Ptr> {
         self.ptr.map(|slot| slot.this(&self.map.nodes))
     }
 
     /// Checks if the cursor is currently at the tail of the linked list.
+    #[inline]
     pub fn at_tail(&self) -> bool {
         self.ptr == self.map.head_tail.as_ref().map(|ht| ht.tail)
     }
 
     /// Checks if the cursor is currently at the head of the linked list.
+    #[inline]
     pub fn at_head(&self) -> bool {
         self.ptr == self.map.head_tail.as_ref().map(|ht| ht.head)
     }
 
     /// Returns the entry at the cursor's current position.
+    #[inline]
     pub fn current(&self) -> Option<(&K, &T)> {
         let ptr = self.ptr?;
         let data = ptr.data(&self.map.nodes);
@@ -208,6 +221,7 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     /// }
     /// assert_eq!(map.get(&"key"), Some(&100));
     /// ```
+    #[inline]
     pub fn current_mut(&mut self) -> Option<(&K, &mut T)> {
         let mut ptr = self.ptr?;
         let data = ptr.data_mut(&mut self.map.nodes);
@@ -237,6 +251,7 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     ///     assert_eq!(map.ptr_get(next_ptr), Some(&2));
     /// }
     /// ```
+    #[inline]
     pub fn next_ptr(&self) -> Option<Ptr> {
         self.ptr
             .map(|slot| slot.next(&self.map.nodes).this(&self.map.nodes))
@@ -269,6 +284,7 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     ///     assert_eq!(value, &2);
     /// }
     /// ```
+    #[inline]
     pub fn next(&self) -> Option<(&K, &T)> {
         let ptr = self.next_ptr()?;
         self.map.ptr_get_entry(ptr)
@@ -303,6 +319,7 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     /// }
     /// assert_eq!(map.get(&"b"), Some(&20));
     /// ```
+    #[inline]
     pub fn next_mut(&mut self) -> Option<(&K, &mut T)> {
         let ptr = self.next_ptr()?;
         self.map.ptr_get_entry_mut(ptr)
@@ -331,6 +348,7 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     ///     assert_eq!(map.ptr_get(prev_ptr), Some(&1));
     /// }
     /// ```
+    #[inline]
     pub fn prev_ptr(&self) -> Option<Ptr> {
         self.ptr
             .map(|slot| slot.prev(&self.map.nodes).this(&self.map.nodes))
@@ -363,6 +381,7 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     ///     assert_eq!(value, &1);
     /// }
     /// ```
+    #[inline]
     pub fn prev(&self) -> Option<(&K, &T)> {
         let ptr = self.prev_ptr()?;
         self.map.ptr_get_entry(ptr)
@@ -397,6 +416,7 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     /// }
     /// assert_eq!(map.get(&"a"), Some(&10));
     /// ```
+    #[inline]
     pub fn prev_mut(&mut self) -> Option<(&K, &mut T)> {
         let ptr = self.prev_ptr()?;
         self.map.ptr_get_entry_mut(ptr)

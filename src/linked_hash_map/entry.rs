@@ -48,6 +48,7 @@ where
     ///
     /// When inserting, the new entry is linked at the tail (end) of the list,
     /// matching the behavior of `insert`/`insert_tail` for new keys.
+    #[inline]
     pub fn or_insert(self, default: V) -> &'a mut V {
         match self {
             Entry::Occupied(e) => e.into_mut(),
@@ -57,6 +58,7 @@ where
 
     /// If the entry is occupied, applies the provided function to the value in
     /// place. Returns the entry for further chaining.
+    #[inline]
     pub fn and_modify<F>(self, f: F) -> Self
     where
         F: FnOnce(&mut V),
@@ -112,6 +114,7 @@ impl<'a, K, T> OccupiedEntry<'a, K, T> {
     ///     Entry::Vacant(_) => unreachable!(),
     /// }
     /// ```
+    #[inline]
     pub fn get(&self) -> &T {
         &self.entry.get().data(self.arena).value
     }
@@ -135,6 +138,7 @@ impl<'a, K, T> OccupiedEntry<'a, K, T> {
     /// }
     /// assert_eq!(map.get(&"key"), Some(&100));
     /// ```
+    #[inline]
     pub fn get_mut(&mut self) -> &mut T {
         &mut self.entry.get_mut().data_mut(self.arena).value
     }
@@ -144,6 +148,7 @@ impl<'a, K, T> OccupiedEntry<'a, K, T> {
     ///
     /// The returned reference is tied to the lifetime of the original map
     /// borrow.
+    #[inline]
     pub fn into_mut(self) -> &'a mut T {
         let OccupiedEntry { entry, .. } = self;
         &mut entry.into_mut().data_mut(self.arena).value
@@ -185,6 +190,7 @@ impl<'a, K, T> OccupiedEntry<'a, K, T> {
     /// let entries: Vec<_> = map.iter().collect();
     /// assert_eq!(entries, [(&"a", &10), (&"b", &2)]);
     /// ```
+    #[inline]
     pub fn insert_no_move(mut self, value: T) -> T {
         core::mem::replace(&mut self.entry.get_mut().data_mut(self.arena).value, value)
     }
@@ -215,6 +221,7 @@ impl<'a, K, T> OccupiedEntry<'a, K, T> {
     ///     Entry::Vacant(_) => unreachable!(),
     /// }
     /// ```
+    #[inline]
     pub fn ptr(&self) -> Ptr {
         self.entry.get().this(self.arena)
     }
@@ -237,6 +244,7 @@ impl<'a, K, T> OccupiedEntry<'a, K, T> {
     ///     Entry::Vacant(_) => unreachable!(),
     /// }
     /// ```
+    #[inline]
     pub fn key(&self) -> &K {
         &self.entry.get().data(self.arena).key
     }
@@ -272,6 +280,7 @@ impl<'a, K, T> OccupiedEntry<'a, K, T> {
     /// }
     /// assert_eq!(map.get(&"key"), Some(&100));
     /// ```
+    #[inline]
     pub fn insert(self, value: T) -> T {
         self.insert_no_move(value)
     }
@@ -361,6 +370,7 @@ impl<'a, K, T> OccupiedEntry<'a, K, T> {
     /// }
     /// assert_eq!(map.len(), 0);
     /// ```
+    #[inline]
     pub fn remove(self) -> T {
         self.remove_entry().1
     }
@@ -417,6 +427,7 @@ impl<'a, K: Hash + Eq, T> VacantEntry<'a, K, T> {
     ///     Entry::Occupied(_) => unreachable!(),
     /// }
     /// ```
+    #[inline]
     pub fn insert_tail(self, value: T) -> (Ptr, &'a mut T) {
         let after = self.head_tail.as_ref().map(|ht| ht.tail);
         let (_, ptr, data) = self.insert_after_internal(value, after);
@@ -447,6 +458,7 @@ impl<'a, K: Hash + Eq, T> VacantEntry<'a, K, T> {
     /// including the new entry in the list yet. In that case, you can create
     /// the entry with `push_unlinked()` and then later link it in using
     /// methods like `link_as_head()`, or `link_as_tail()`.
+    #[inline]
     pub fn insert_unlinked(self, value: T) -> (Ptr, &'a mut T) {
         let mut ptr = self.nodes.alloc_circular(self.key, value);
         self.entry.insert(ptr);
@@ -485,6 +497,7 @@ impl<'a, K: Hash + Eq, T> VacantEntry<'a, K, T> {
     /// let entries: Vec<_> = map.iter().collect();
     /// assert_eq!(entries, [(&"first", &1), (&"second", &2), (&"third", &3)]);
     /// ```
+    #[inline]
     pub fn insert_after(self, value: T, after: Ptr) -> (Ptr, &'a mut T) {
         let after = self
             .nodes
@@ -567,6 +580,7 @@ impl<'a, K: Hash + Eq, T> VacantEntry<'a, K, T> {
     /// let entries: Vec<_> = map.iter().collect();
     /// assert_eq!(entries, [(&"first", &1), (&"second", &2)]);
     /// ```
+    #[inline]
     pub fn insert_head(self, value: T) -> (Ptr, &'a mut T) {
         let ptr = self.head_tail.as_ref().map(|ht| ht.head);
         let (_, ptr, data) = self.insert_before_internal(value, ptr);
@@ -605,6 +619,7 @@ impl<'a, K: Hash + Eq, T> VacantEntry<'a, K, T> {
     /// let entries: Vec<_> = map.iter().collect();
     /// assert_eq!(entries, [(&"first", &1), (&"second", &2), (&"third", &3)]);
     /// ```
+    #[inline]
     pub fn insert_before(self, value: T, before: Ptr) -> (Ptr, &'a mut T) {
         let before = self
             .nodes
@@ -686,6 +701,7 @@ impl<'a, K: Hash + Eq, T> VacantEntry<'a, K, T> {
     /// }
     /// assert_eq!(map.len(), 0);
     /// ```
+    #[inline]
     pub fn into_key(self) -> K {
         self.key
     }
@@ -708,6 +724,7 @@ impl<'a, K: Hash + Eq, T> VacantEntry<'a, K, T> {
     ///     Entry::Occupied(_) => unreachable!(),
     /// }
     /// ```
+    #[inline]
     pub fn key(&self) -> &K {
         &self.key
     }

@@ -36,6 +36,7 @@ pub struct Iter<'a, K, T> {
 impl<'a, K, T> Iterator for Iter<'a, K, T> {
     type Item = (&'a K, &'a T);
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         let ptr = self.forward_ptr?;
         if self.forward_ptr == self.reverse_ptr {
@@ -52,6 +53,7 @@ impl<'a, K, T> Iterator for Iter<'a, K, T> {
 }
 
 impl<'a, K, T> DoubleEndedIterator for Iter<'a, K, T> {
+    #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         let ptr = self.reverse_ptr?;
         if self.reverse_ptr == self.forward_ptr {
@@ -98,6 +100,7 @@ pub struct IntoIter<K, T> {
 impl<K, T> Iterator for IntoIter<K, T> {
     type Item = (K, T);
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         let ptr = self.forward_ptr?;
         if self.forward_ptr == self.reverse_ptr {
@@ -114,6 +117,7 @@ impl<K, T> Iterator for IntoIter<K, T> {
 }
 
 impl<K, T> DoubleEndedIterator for IntoIter<K, T> {
+    #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         let ptr = self.reverse_ptr?;
         if self.reverse_ptr == self.forward_ptr {
@@ -190,6 +194,7 @@ pub struct ValuesMut<'a, K, T> {
 impl<'a, K, T> Iterator for IterMut<'a, K, T> {
     type Item = (&'a K, &'a mut T);
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         // SAFETY: We yield exactly one item per ptr. Our ptrs are unique. We trust the
         // pointers we are iterating over came from our arena. We tie the lifetime to
@@ -217,6 +222,7 @@ impl<'a, K, T> Iterator for IterMut<'a, K, T> {
 }
 
 impl<'a, K, T> DoubleEndedIterator for IterMut<'a, K, T> {
+    #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         // SAFETY: We yield exactly one item per ptr. Our ptrs are unique. We trust the
         // pointers we are iterating over came from our arena. We tie the lifetime to
@@ -246,16 +252,19 @@ impl<'a, K, T> DoubleEndedIterator for IterMut<'a, K, T> {
 impl<'a, K, T> Iterator for ValuesMut<'a, K, T> {
     type Item = &'a mut T;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next().map(|(_, v)| v)
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.iter.size_hint()
     }
 }
 
 impl<'a, K, T> DoubleEndedIterator for ValuesMut<'a, K, T> {
+    #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         self.iter.next_back().map(|(_, v)| v)
     }
