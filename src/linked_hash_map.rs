@@ -21,22 +21,47 @@
 use alloc::vec::Vec;
 use core::clone::Clone;
 use core::cmp::Eq;
+use core::fmt::Debug;
 use core::hash::BuildHasher;
 use core::hash::Hash;
+use core::hint::unreachable_unchecked;
 use core::marker::PhantomData;
 use core::ops::Index;
 use core::ops::IndexMut;
 use core::panic;
-use core::ptr::NonNull;
 
 use hashbrown::HashTable;
 use hashbrown::hash_table;
 
 use crate::Ptr;
 use crate::RandomState;
+use crate::arena::ActiveSlotRef;
 use crate::arena::Arena;
+use crate::arena::ArenaContainer;
 use crate::arena::FreedSlot;
-use crate::arena::LLSlot;
+use crate::arena::Links;
+
+struct HeadTail<K, T> {
+    head: ActiveSlotRef<K, T>,
+    tail: ActiveSlotRef<K, T>,
+}
+
+impl<K, T> Debug for HeadTail<K, T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("HeadTail")
+            .field("head", &self.head)
+            .field("tail", &self.tail)
+            .finish()
+    }
+}
+
+impl<K, T> PartialEq for HeadTail<K, T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.head == other.head && self.tail == other.tail
+    }
+}
+
+impl<K, T> Eq for HeadTail<K, T> {}
 
 /// A hash map that maintains relative order using a doubly-linked list.
 ///
@@ -66,10 +91,9 @@ use crate::arena::LLSlot;
 /// // Prints: apple: 5, banana: 3, cherry: 8
 /// ```
 pub struct LinkedHashMap<K, T, S = RandomState> {
-    head: Option<NonNull<LLSlot<K, T>>>,
-    tail: Option<NonNull<LLSlot<K, T>>>,
-    nodes: Arena<K, T>,
-    table: HashTable<NonNull<LLSlot<K, T>>>,
+    nodes: ArenaContainer<K, T>,
+    head_tail: Option<HeadTail<K, T>>,
+    table: HashTable<ActiveSlotRef<K, T>>,
     hasher: S,
 }
 
@@ -126,19 +150,24 @@ impl<K: core::fmt::Debug, T: core::fmt::Debug, S> core::fmt::Debug for LinkedHas
             next: &'a K,
         }
 
+        let mut prevnext = Vec::with_capacity(self.len());
         let mut entries = Vec::with_capacity(self.len());
 
         for ptr in self.table.iter() {
             // SAFETY: All pointers come from our own arena
-            let entry = unsafe { ptr.as_ref() };
-            let next_key = unsafe { &entry.links.next().as_ref().data.assume_init_ref().key };
-            let prev_key = unsafe { &entry.links.prev().as_ref().data.assume_init_ref().key };
-            let key = unsafe { &entry.data.assume_init_ref().key };
-            let value = unsafe { &entry.data.assume_init_ref().value };
+            let next = ptr.next(&self.nodes);
+            let prev = ptr.prev(&self.nodes);
+            prevnext.push((prev, next));
+        }
+
+        for (ptr, (prev, next)) in self.table.iter().zip(prevnext.iter()) {
+            let data = ptr.data(&self.nodes);
+            let prev_key = &prev.data(&self.nodes).key;
+            let next_key = &next.data(&self.nodes).key;
 
             entries.push(Entry {
-                key,
-                value,
+                key: &data.key,
+                value: &data.value,
                 previous: prev_key,
                 next: next_key,
             });
@@ -147,8 +176,8 @@ impl<K: core::fmt::Debug, T: core::fmt::Debug, S> core::fmt::Debug for LinkedHas
         // SAFETY: head & tail are valid pointers into our own arena.
         f.debug_struct("LinkedHashMap")
             .field("len", &self.len())
-            .field("head", &self.head.map(|p| p.addr()))
-            .field("tail", &self.tail.map(|p| p.addr()))
+            .field("head", &self.head_tail.as_ref().map(|ht| &ht.head))
+            .field("tail", &self.head_tail.as_ref().map(|ht| &ht.tail))
             .field("entries", &entries)
             .finish()?;
 
@@ -177,13 +206,7 @@ impl<K, T> LinkedHashMap<K, T> {
     /// assert_eq!(map.len(), 0);
     /// ```
     pub fn with_capacity(capacity: usize) -> Self {
-        LinkedHashMap {
-            head: None,
-            tail: None,
-            nodes: Arena::with_capacity(capacity),
-            table: HashTable::with_capacity(capacity),
-            hasher: RandomState::default(),
-        }
+        Self::with_capacity_and_hasher(capacity, RandomState::default())
     }
 
     /// Creates a new, empty linked hash map.
@@ -224,8 +247,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// ```
     pub fn with_capacity_and_hasher(capacity: usize, hasher: S) -> Self {
         LinkedHashMap {
-            head: None,
-            tail: None,
+            head_tail: None,
             nodes: Arena::with_capacity(capacity),
             table: HashTable::with_capacity(capacity),
             hasher,
@@ -275,79 +297,59 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
         let moved = self.nodes.map_ptr(moved)?;
         let after = self.nodes.map_ptr(after)?;
 
-        // SAFETY: Both pointers are occupied, and not identical per the above
-        // checks.
-        unsafe { self.move_after_internal(moved, after) }
+        self.move_after_internal(moved, after)
     }
 
-    /// # Safety
-    ///
-    /// Both pointers must be occupied, meaning they are part of this map's
-    /// arena. They must not be equal.
-    unsafe fn move_after_internal(
+    fn move_after_internal(
         &mut self,
-        mut moved: NonNull<LLSlot<K, T>>,
-        mut after: NonNull<LLSlot<K, T>>,
+        mut moved: ActiveSlotRef<K, T>,
+        mut after: ActiveSlotRef<K, T>,
     ) -> Option<()> {
         debug_assert_ne!(moved, after);
 
-        // SAFETY: Per contract of this function, moved/after are occupied.
-        let (mut needs_next, mut needs_prev, mut also_needs_prev) = unsafe {
-            let moved_mut = moved.as_mut();
+        if let Some(head_tail) = self.head_tail.as_mut()
+            && head_tail.tail == after
+            && head_tail.head == moved
+        {
+            head_tail.tail = moved;
+            head_tail.head = moved.next(&self.nodes);
+            return Some(());
+        }
 
-            if Some(after) == self.tail && Some(moved) == self.head {
-                self.tail = Some(moved);
-                self.head = Some(moved_mut.links.next());
-                return Some(());
-            }
+        if after.next(&self.nodes) == moved {
+            return None;
+        }
 
-            let after_mut = after.as_mut();
+        let mut needs_next = moved.prev(&self.nodes);
+        let mut needs_prev = moved.next(&self.nodes);
+        let mut also_needs_prev = after.next(&self.nodes);
 
-            if after_mut.links.next() == moved {
-                return None;
-            }
-
-            let needs_next = moved_mut.links.prev();
-            let needs_prev = moved_mut.links.next();
-            let also_needs_prev = after_mut.links.next();
-
-            *moved_mut.links.next_mut() = also_needs_prev;
-            *moved_mut.links.prev_mut() = after;
-            *after_mut.links.next_mut() = moved;
-
-            (needs_next, needs_prev, also_needs_prev)
-        };
+        *moved.next_mut(&mut self.nodes) = also_needs_prev;
+        *moved.prev_mut(&mut self.nodes) = after;
+        *after.next_mut(&mut self.nodes) = moved;
 
         if also_needs_prev != after {
-            // SAFETY: We do not have non occupied pointers links in our list.
-            unsafe {
-                *also_needs_prev.as_mut().links.prev_mut() = moved;
-            }
+            *also_needs_prev.prev_mut(&mut self.nodes) = moved;
         }
 
         if needs_next != moved {
-            // SAFETY: We do not have non occupied pointers links in our list.
-            unsafe {
-                *needs_next.as_mut().links.next_mut() = needs_prev;
-            }
+            *needs_next.next_mut(&mut self.nodes) = needs_prev;
         }
 
         if needs_prev != moved {
-            // SAFETY: We do not have non occupied pointers links in our list.
-            unsafe {
-                *needs_prev.as_mut().links.prev_mut() = needs_next;
+            *needs_prev.prev_mut(&mut self.nodes) = needs_next;
+        }
+
+        if let Some(head_tail) = self.head_tail.as_mut() {
+            if head_tail.head == moved {
+                head_tail.head = needs_prev;
             }
-        }
-
-        if self.head == Some(moved) {
-            self.head = Some(needs_prev);
-        }
-        if self.tail == Some(moved) {
-            self.tail = Some(needs_next);
-        }
-
-        if self.tail == Some(after) {
-            self.tail = Some(moved);
+            if head_tail.tail == moved {
+                head_tail.tail = needs_next;
+            }
+            if head_tail.tail == after {
+                head_tail.tail = moved;
+            }
         }
 
         Some(())
@@ -397,79 +399,59 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
         let moved = self.nodes.map_ptr(moved)?;
         let before = self.nodes.map_ptr(before)?;
 
-        // SAFETY: Both pointers are occupied, and not identical per the above
-        // checks.
-        unsafe { self.move_before_internal(moved, before) }
+        self.move_before_internal(moved, before)
     }
 
-    /// # Safety
-    ///
-    /// Both pointers must be occupied, meaning they are part of this map's
-    /// arena. They must not be equal.
-    unsafe fn move_before_internal(
+    fn move_before_internal(
         &mut self,
-        mut moved: NonNull<LLSlot<K, T>>,
-        mut before: NonNull<LLSlot<K, T>>,
+        mut moved: ActiveSlotRef<K, T>,
+        mut before: ActiveSlotRef<K, T>,
     ) -> Option<()> {
         debug_assert_ne!(moved, before);
 
-        // SAFETY: Per contract of this function, moved/after are occupied.
-        let (mut needs_next, mut needs_prev, mut also_needs_next) = unsafe {
-            let moved_mut = moved.as_mut();
+        if let Some(head_tail) = self.head_tail.as_mut()
+            && head_tail.head == before
+            && head_tail.tail == moved
+        {
+            head_tail.head = moved;
+            head_tail.tail = moved.prev(&self.nodes);
+            return Some(());
+        }
 
-            if Some(before) == self.head && Some(moved) == self.tail {
-                self.head = Some(moved);
-                self.tail = Some(moved_mut.links.prev());
-                return Some(());
-            }
+        if before.prev(&self.nodes) == moved {
+            return None;
+        }
 
-            let before_mut = before.as_mut();
+        let mut needs_next = moved.prev(&self.nodes);
+        let mut needs_prev = moved.next(&self.nodes);
+        let mut also_needs_next = before.prev(&self.nodes);
 
-            if before_mut.links.prev() == moved {
-                return None;
-            }
-
-            let needs_next = moved_mut.links.prev();
-            let needs_prev = moved_mut.links.next();
-            let also_needs_next = before_mut.links.prev();
-
-            *moved_mut.links.next_mut() = before;
-            *moved_mut.links.prev_mut() = also_needs_next;
-            *before_mut.links.prev_mut() = moved;
-
-            (needs_next, needs_prev, also_needs_next)
-        };
+        *moved.next_mut(&mut self.nodes) = before;
+        *moved.prev_mut(&mut self.nodes) = also_needs_next;
+        *before.prev_mut(&mut self.nodes) = moved;
 
         if also_needs_next != before {
-            // SAFETY: We do not have non occupied pointers links in our list.
-            unsafe {
-                *also_needs_next.as_mut().links.next_mut() = moved;
-            }
+            *also_needs_next.next_mut(&mut self.nodes) = moved;
         }
 
         if needs_next != moved {
-            // SAFETY: We do not have non occupied pointers links in our list.
-            unsafe {
-                *needs_next.as_mut().links.next_mut() = needs_prev;
-            }
+            *needs_next.next_mut(&mut self.nodes) = needs_prev;
         }
 
         if needs_prev != moved {
-            // SAFETY: We do not have non occupied pointers links in our list.
-            unsafe {
-                *needs_prev.as_mut().links.prev_mut() = needs_next;
+            *needs_prev.prev_mut(&mut self.nodes) = needs_next;
+        }
+
+        if let Some(head_tail) = self.head_tail.as_mut() {
+            if head_tail.head == moved {
+                head_tail.head = needs_prev;
             }
-        }
-
-        if self.head == Some(moved) {
-            self.head = Some(needs_prev);
-        }
-        if self.tail == Some(moved) {
-            self.tail = Some(needs_next);
-        }
-
-        if self.head == Some(before) {
-            self.head = Some(moved);
+            if head_tail.tail == moved {
+                head_tail.tail = needs_next;
+            }
+            if head_tail.head == before {
+                head_tail.head = moved;
+            }
         }
 
         Some(())
@@ -491,8 +473,12 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// * `None` if the pointer is invalid
     pub fn link_as_head(&mut self, ptr: Ptr) -> Option<()> {
         let node = self.nodes.map_ptr(ptr)?;
-        // SAFETY: We just checked that ptr is occupied.
-        unsafe { self.link_node_internal(node, self.tail, self.head, true) }
+        self.link_node_internal(
+            node,
+            self.head_tail.as_ref().map(|ht| ht.tail),
+            self.head_tail.as_ref().map(|ht| ht.head),
+            true,
+        )
     }
 
     /// Links an entry as the new tail of the linked list.
@@ -511,8 +497,12 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// * `None` if the pointer is invalid
     pub fn link_as_tail(&mut self, ptr: Ptr) -> Option<()> {
         let node = self.nodes.map_ptr(ptr)?;
-        // SAFETY: We just checked that ptr is occupied .
-        unsafe { self.link_node_internal(node, self.tail, self.head, false) }
+        self.link_node_internal(
+            node,
+            self.head_tail.as_ref().map(|ht| ht.tail),
+            self.head_tail.as_ref().map(|ht| ht.head),
+            false,
+        )
     }
 
     /// Links an entry into the doubly-linked list at a specific position after
@@ -520,9 +510,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     pub fn link_after(&mut self, ptr: Ptr, prev: Ptr) -> Option<()> {
         let node = self.nodes.map_ptr(ptr)?;
         let prev = self.nodes.map_ptr(prev);
-        // SAFETY: ptr is occupied and non-null per the above checks. If prev is
-        // non-null, it must also be occupied since it came from our own arena.
-        unsafe { self.link_node_internal(node, prev, None, false) }
+        self.link_node_internal(node, prev, None, false)
     }
 
     /// Links an entry into the doubly-linked list at a specific position before
@@ -532,74 +520,56 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
         let next = self.nodes.map_ptr(next);
         // SAFETY: ptr is occupied and non-null per the above checks. If next is
         // non-null, it must also be occupied since it came from our own arena.
-        unsafe { self.link_node_internal(node, None, next, true) }
+        self.link_node_internal(node, None, next, true)
     }
 
     /// # Safety
     ///
     /// `node` must be occupied (i.e. part of this map's arena). If prev and
     /// next are non-null, they must also be occupied.
-    unsafe fn link_node_internal(
+    fn link_node_internal(
         &mut self,
-        mut node: NonNull<LLSlot<K, T>>,
-        prev: Option<NonNull<LLSlot<K, T>>>,
-        next: Option<NonNull<LLSlot<K, T>>>,
+        mut node: ActiveSlotRef<K, T>,
+        prev: Option<ActiveSlotRef<K, T>>,
+        next: Option<ActiveSlotRef<K, T>>,
         as_head: bool,
     ) -> Option<()> {
-        if self.head.is_none() && self.tail.is_none() {
-            self.head = Some(node);
-            self.tail = Some(node);
-            // SAFETY: Node is occupied per contract.
-            unsafe {
-                *node.as_mut().links.next_mut() = node;
-            };
-            // SAFETY: Node is occupied per contract.
-            unsafe {
-                *node.as_mut().links.prev_mut() = node;
+        if let Some(head_tail) = self.head_tail.as_mut() {
+            if prev.is_none() && next.is_none() {
+                return None;
             }
-            return Some(());
-        }
 
-        if prev.is_none() && next.is_none() {
-            return None;
-        }
+            let mut prev = if let Some(prev) = prev {
+                prev
+            } else {
+                next.unwrap().prev(&self.nodes)
+            };
 
-        let mut prev = if let Some(prev) = prev {
-            prev
+            let mut next = if let Some(next) = next {
+                next
+            } else {
+                prev.next(&self.nodes)
+            };
+
+            *prev.next_mut(&mut self.nodes) = node;
+            *next.prev_mut(&mut self.nodes) = node;
+            *node.prev_mut(&mut self.nodes) = prev;
+            *node.next_mut(&mut self.nodes) = next;
+
+            if !as_head && head_tail.tail == prev {
+                head_tail.tail = node;
+            } else if as_head && head_tail.head == next {
+                head_tail.head = node;
+            }
+
+            Some(())
         } else {
-            // SAFETY: We know that either prev or next is non-null per the above
-            // check. We just checked if prev was null, so next must be valid. It must also
-            // be occupied per function contract.
-            unsafe { next.unwrap().as_ref().links.prev() }
-        };
-
-        let mut next = if let Some(next) = next {
-            next
-        } else {
-            // SAFETY: We know that either prev or next is non-null per the above
-            // check. We just checked if next was null, so prev must be valid. It must also
-            // be occupied per function contract.
-            unsafe { prev.as_ref().links.next() }
-        };
-
-        // SAFETY: We know from the above checks that prev, next, and node are occupied.
-        // prev.next is either null or occupied, since prev is from our arena.
-        // Similarly, next.prev is either null or occupied, since next is from our
-        // arena.
-        unsafe {
-            *prev.as_mut().links.next_mut() = node;
-            *next.as_mut().links.prev_mut() = node;
-            *node.as_mut().links.prev_mut() = prev;
-            *node.as_mut().links.next_mut() = next;
+            self.head_tail = Some(HeadTail {
+                head: node,
+                tail: node,
+            });
+            Some(())
         }
-
-        if as_head && self.head == Some(next) {
-            self.head = Some(node);
-        } else if !as_head && self.tail == Some(prev) {
-            self.tail = Some(node);
-        }
-
-        Some(())
     }
 
     /// Moves an entry to the tail (end) of the linked list.
@@ -730,8 +700,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// ```
     pub fn next_ptr(&self, ptr: Ptr) -> Option<Ptr> {
         let ptr = self.nodes.map_ptr(ptr)?;
-        // SAFETY: We just checked that ptr is occupied.
-        unsafe { Some(ptr.as_ref().links.next().as_ref().this) }
+        Some(ptr.next(&self.nodes).this(&self.nodes))
     }
 
     /// Returns the pointer to the previous entry in the linked list.
@@ -760,8 +729,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// ```
     pub fn prev_ptr(&self, ptr: Ptr) -> Option<Ptr> {
         let ptr = self.nodes.map_ptr(ptr)?;
-        // SAFETY: We just checked that ptr is occupied.
-        unsafe { Some(ptr.as_ref().links.prev().as_ref().this) }
+        Some(ptr.prev(&self.nodes).this(&self.nodes))
     }
 
     /// Creates a mutable cursor positioned at the head (first entry) of the
@@ -789,7 +757,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// ```
     pub fn head_cursor_mut(&'_ mut self) -> CursorMut<'_, K, T, S> {
         CursorMut {
-            ptr: self.head,
+            ptr: self.head_tail.as_ref().map(|ht| ht.head),
             map: self,
         }
     }
@@ -819,38 +787,33 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// ```
     pub fn tail_cursor_mut(&'_ mut self) -> CursorMut<'_, K, T, S> {
         CursorMut {
-            ptr: self.tail,
+            ptr: self.head_tail.as_ref().map(|ht| ht.tail),
             map: self,
         }
     }
 
     /// Returns the pointer to the head (first entry) of the linked list.
     pub fn head_ptr(&self) -> Option<Ptr> {
-        // SAFETY: head is either null or a valid pointer into our own arena.
-        unsafe { self.head.map(|p| p.as_ref().this) }
+        self.head_tail.as_ref().map(|ht| ht.head.this(&self.nodes))
     }
 
     /// Returns the pointer to the tail (last entry) of the linked list.
     pub fn tail_ptr(&self) -> Option<Ptr> {
-        // SAFETY: tail is either null or a valid pointer into our own arena.
-        unsafe { self.tail.map(|p| p.as_ref().this) }
+        self.head_tail.as_ref().map(|ht| ht.tail.this(&self.nodes))
     }
 
     /// Returns a reference to the value associated with the given pointer.
     pub fn ptr_get(&self, ptr: Ptr) -> Option<&T> {
         // SAFETY: We just retrieved the pointer from our own arena.
-        self.nodes
-            .map_ptr(ptr)
-            .map(|p| unsafe { &p.as_ref().data.assume_init_ref().value })
+        self.nodes.map_ptr(ptr).map(|p| &p.data(&self.nodes).value)
     }
 
     /// Returns a reference to the key-value pair associated with the given
     /// pointer.
     pub fn ptr_get_entry(&self, ptr: Ptr) -> Option<(&K, &T)> {
         self.nodes.map_ptr(ptr).map(|p| {
-            // SAFETY: We just retrieved the pointer from our own arena.
-            let r = unsafe { p.as_ref().data.assume_init_ref() };
-            (&r.key, &r.value)
+            let data = p.data(&self.nodes);
+            (&data.key, &data.value)
         })
     }
 
@@ -858,27 +821,23 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// given pointer.
     pub fn ptr_get_entry_mut(&mut self, ptr: Ptr) -> Option<(&K, &mut T)> {
         self.nodes.map_ptr(ptr).map(|mut p| {
-            // SAFETY: We just retrieved the pointer from our own arena.
-            unsafe { p.as_mut().data.assume_init_mut().key_value_mut() }
+            let data = p.data_mut(&mut self.nodes);
+            (&data.key, &mut data.value)
         })
     }
 
     /// Returns a mutable reference to the value associated with the given
     /// pointer.
     pub fn ptr_get_mut(&mut self, ptr: Ptr) -> Option<&mut T> {
-        self.nodes.map_ptr(ptr).map(|mut p| {
-            // SAFETY: We just retrieved the pointer from our own arena.
-            let r = unsafe { p.as_mut().data.assume_init_mut() };
-            &mut r.value
-        })
+        self.nodes
+            .map_ptr(ptr)
+            .map(|mut p| &mut p.data_mut(&mut self.nodes).value)
     }
 
     /// Returns a reference to the key associated with the given pointer.
     pub fn ptr_get_key(&self, ptr: Ptr) -> Option<&K> {
         // SAFETY: We just retrieved the pointer from our own arena.
-        self.nodes
-            .map_ptr(ptr)
-            .map(|p| unsafe { &p.as_ref().data.assume_init_ref().key })
+        self.nodes.map_ptr(ptr).map(|p| &p.data(&self.nodes).key)
     }
 
     /// Returns the number of elements in the map.
@@ -929,13 +888,12 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// ```
     pub fn clear(&mut self) {
         for node in self.table.drain() {
-            // SAFETY: We only store valid pointers into our own arena
+            // SAFETY: We do not touch nodes after freeing them, so this is safe.
             unsafe {
                 self.nodes.free_and_unlink(node);
             }
         }
-        self.head = None;
-        self.tail = None;
+        self.head_tail = None;
     }
 
     /// Returns an iterator over the key-value pairs of the map, in relative
@@ -957,11 +915,11 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     ///     println!("key: {} val: {}", key, val);
     /// }
     /// ```
-    pub fn iter<'s>(&'s self) -> Iter<'s, K, T, S> {
+    pub fn iter<'s>(&'s self) -> Iter<'s, K, T> {
         Iter {
-            forward_ptr: self.head,
-            reverse_ptr: self.tail,
-            _map: core::marker::PhantomData,
+            forward_ptr: self.head_tail.as_ref().map(|ht| ht.head),
+            reverse_ptr: self.head_tail.as_ref().map(|ht| ht.tail),
+            nodes: &self.nodes,
         }
     }
 
@@ -1111,8 +1069,8 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// ```
     pub fn iter_mut<'s>(&'s mut self) -> IterMut<'s, K, T> {
         IterMut {
-            forward_ptr: self.head,
-            reverse_ptr: self.tail,
+            forward_ptr: self.head_tail.as_ref().map(|ht| ht.head),
+            reverse_ptr: self.head_tail.as_ref().map(|ht| ht.tail),
             _nodes: core::marker::PhantomData,
         }
     }
@@ -1183,14 +1141,11 @@ impl<K, T, S> IntoIterator for LinkedHashMap<K, T, S> {
     type IntoIter = IntoIter<K, T>;
     type Item = (K, T);
 
-    fn into_iter(mut self) -> Self::IntoIter {
-        let nodes = core::mem::replace(&mut self.nodes, Arena::new());
-        self.table.clear(); // Clear the table to avoid double-free
-
+    fn into_iter(self) -> Self::IntoIter {
         IntoIter {
-            nodes,
-            forward_ptr: self.head,
-            reverse_ptr: self.tail,
+            nodes: self.nodes,
+            forward_ptr: self.head_tail.as_ref().map(|ht| ht.head),
+            reverse_ptr: self.head_tail.as_ref().map(|ht| ht.tail),
         }
     }
 }
@@ -1205,31 +1160,27 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// as it's not possible to safely shrink that without risking invalidating
     /// existing pointers.
     pub fn shrink_to_fit(&mut self) {
-        self.table.shrink_to_fit(|k| {
-            // SAFETY: We only store valid pointers into our own arena
-            unsafe { self.hasher.hash_one(&k.as_ref().data.assume_init_ref().key) }
-        });
+        self.table
+            .shrink_to_fit(|k| self.hasher.hash_one(&k.data(&self.nodes).key));
     }
 
     /// Removes the entry at the tail (end) of the linked list.
     ///
     /// This is equivalent to calling `remove_ptr(tail_ptr())`, but is more
     /// performant.
-    pub fn remove_tail(&mut self) -> Option<RemovedEntry<K, T>> {
-        let ptr = self.tail?;
+    pub fn remove_tail(&mut self) -> Option<(Ptr, RemovedEntry<K, T>)> {
+        let ptr = self.head_tail.as_ref().map(|ht| ht.tail)?;
 
-        // SAFETY: We know our tail is not null and from our arena.
-        unsafe { Some(self.remove_ptr_internal(ptr)) }
+        Some(self.remove_ptr_internal(ptr))
     }
 
     /// Removes the entry at the head (beginning) of the linked list.
     ///
     /// This is equivalent to calling `remove_ptr(head_ptr())`, but is more
     /// performant.
-    pub fn remove_head(&mut self) -> Option<RemovedEntry<K, T>> {
-        let ptr = self.head?;
-        // SAFETY: We know our head is not null and from our arena.
-        unsafe { Some(self.remove_ptr_internal(ptr)) }
+    pub fn remove_head(&mut self) -> Option<(Ptr, RemovedEntry<K, T>)> {
+        let ptr = self.head_tail.as_ref().map(|ht| ht.head)?;
+        Some(self.remove_ptr_internal(ptr))
     }
 
     /// Removes the entry at the given pointer from the map.
@@ -1240,20 +1191,11 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     pub fn remove_ptr(&mut self, ptr: Ptr) -> Option<RemovedEntry<K, T>> {
         let ptr = self.nodes.map_ptr(ptr)?;
 
-        // SAFETY: We just checked that ptr is occupied.
-        unsafe { Some(self.remove_ptr_internal(ptr)) }
+        Some(self.remove_ptr_internal(ptr).1)
     }
 
-    /// # Safety
-    ///
-    /// `ptr` must be occupied (i.e. part of this map's arena).
-    unsafe fn remove_ptr_internal(&mut self, ptr: NonNull<LLSlot<K, T>>) -> RemovedEntry<K, T> {
-        // SAFETY: ptr is occupied per the function contract, so we know it is from our
-        // own arena.
-        let hash = unsafe {
-            self.hasher
-                .hash_one(&ptr.as_ref().data.assume_init_ref().key)
-        };
+    fn remove_ptr_internal(&mut self, ptr: ActiveSlotRef<K, T>) -> (Ptr, RemovedEntry<K, T>) {
+        let hash = self.hasher.hash_one(&ptr.data(&self.nodes).key);
 
         match self.table.find_entry(hash, move |k| *k == ptr) {
             Ok(occupied) => {
@@ -1269,31 +1211,40 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
             }
         };
 
-        // SAFETY: ptr is occupied per the function contract, so we know it is from our
-        // own arena. After this call, ptr is invalidated, and we update
-        // head/tail below in finish_removal which does not examine ptr's data.
+        // SAFETY: We have removed the pointer from our table, and we do not dereference
+        // it after this point.
         let FreedSlot {
             data,
-            prev,
-            next,
-            prev_raw,
-            next_raw,
-            ..
+            prev_next,
+            this,
         } = unsafe { self.nodes.free_and_unlink(ptr) };
 
-        if self.head == Some(ptr) {
-            self.head = next_raw;
-        }
-        if self.tail == Some(ptr) {
-            self.tail = prev_raw;
+        if let Some((prev, next)) = prev_next {
+            if let Some(head_tail) = self.head_tail.as_mut() {
+                if head_tail.head == ptr {
+                    head_tail.head = next;
+                }
+                if head_tail.tail == ptr {
+                    head_tail.tail = prev;
+                }
+            }
+        } else if self
+            .head_tail
+            .as_ref()
+            .is_some_and(|ht| ht.head == ptr || ht.tail == ptr)
+        {
+            self.head_tail = None;
         }
 
-        RemovedEntry {
-            key: data.key,
-            value: data.value,
-            prev,
-            next,
-        }
+        (
+            this,
+            RemovedEntry {
+                key: data.key,
+                value: data.value,
+                prev: prev_next.map(|(p, _)| p.this(&self.nodes)),
+                next: prev_next.map(|(_, n)| n.this(&self.nodes)),
+            },
+        )
     }
 
     /// Retains only the entries specified by the predicate.
@@ -1338,7 +1289,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     where
         F: FnMut(&K, &mut T) -> bool,
     {
-        let Some(mut ptr) = self.head else {
+        let Some(mut ptr) = self.head_tail.as_ref().map(|ht| ht.head) else {
             return;
         };
 
@@ -1346,17 +1297,11 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
         let len = self.len();
         while seen < len {
             seen += 1;
-            // SAFETY: We do not have non occupied pointer links in our list.
-            let next = unsafe { ptr.as_ref().links.next() };
-            let should_remove = {
-                let node = unsafe { ptr.as_mut().data.assume_init_mut() };
-                let (key, value) = node.key_value_mut();
-                !f(key, value)
-            };
+            let next = ptr.next(&self.nodes);
+            let node = ptr.data_mut(&mut self.nodes);
 
-            if should_remove {
-                // SAFETY: We do not have non occupied pointer links in our list.
-                unsafe { self.remove_ptr_internal(ptr) };
+            if !f(&node.key, &mut node.value) {
+                self.remove_ptr_internal(ptr);
             }
             ptr = next;
         }
@@ -1635,7 +1580,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
                 (ptr, Some(old))
             }
             Entry::Vacant(vacant_entry) => {
-                let ptr = vacant_entry.insert_head(value);
+                let (ptr, _) = vacant_entry.insert_head(value);
                 (ptr, None)
             }
         }
@@ -1675,10 +1620,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
         // SAFETY: We only store valid pointers into our own arena
         let ptr = self
             .table
-            .find(
-                hash,
-                |k| unsafe { &k.as_ref().data.assume_init_ref().key } == key,
-            )
+            .find(hash, |k| &k.data(&self.nodes).key == key)
             .copied();
         CursorMut { ptr, map: self }
     }
@@ -1734,27 +1676,19 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
         let hash = self.hasher.hash_one(&key);
         match self.table.entry(
             hash,
-            |k| {
-                // SAFETY: We only store valid pointers into our own arena
-                unsafe { k.as_ref().data.assume_init_ref().key == key }
-            },
-            |e| {
-                // SAFETY: We only store valid pointers into our own arena
-                unsafe { self.hasher.hash_one(&e.as_ref().data.assume_init_ref().key) }
-            },
+            |k| k.data(&self.nodes).key == key,
+            |e| self.hasher.hash_one(&e.data(&self.nodes).key),
         ) {
             hash_table::Entry::Occupied(entry) => Entry::Occupied(OccupiedEntry {
                 arena: &mut self.nodes,
-                head: &mut self.head,
-                tail: &mut self.tail,
+                head_tail: &mut self.head_tail,
                 entry,
             }),
             hash_table::Entry::Vacant(entry) => Entry::Vacant(VacantEntry {
                 entry,
                 key,
                 nodes: &mut self.nodes,
-                head: &mut self.head,
-                tail: &mut self.tail,
+                head_tail: &mut self.head_tail,
             }),
         }
     }
@@ -1790,7 +1724,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// assert_eq!(map.remove(&1), None);
     /// ```
     pub fn remove_entry(&mut self, key: &K) -> Option<(K, T)> {
-        let (_, removed) = self.remove_with_ptr(key)?;
+        let (_, removed) = self.remove_full(key)?;
         Some((removed.key, removed.value))
     }
 
@@ -1818,7 +1752,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// let (ptr, _) = map.insert_tail_full("a", 1);
     ///
     /// // Remove by key
-    /// let result = map.remove_with_ptr(&"a");
+    /// let result = map.remove_full(&"a");
     /// assert!(result.is_some());
     /// let (removed_ptr, removed_entry) = result.unwrap();
     /// assert_eq!(removed_ptr, ptr);
@@ -1827,36 +1761,44 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// assert_eq!(removed_entry.prev, None);
     /// assert_eq!(removed_entry.next, None);
     /// // Removing a non-existent key returns None
-    /// assert_eq!(map.remove_with_ptr(&"b"), None);
+    /// assert_eq!(map.remove_full(&"b"), None);
     /// ```
-    pub fn remove_with_ptr(&mut self, key: &K) -> Option<(Ptr, RemovedEntry<K, T>)> {
+    pub fn remove_full(&mut self, key: &K) -> Option<(Ptr, RemovedEntry<K, T>)> {
         if self.is_empty() {
             return None;
         }
 
         let hash = self.hasher.hash_one(key);
-        match self.table.find_entry(hash, |k| {
-            // SAFETY: We only store valid pointers into our own arena
-            unsafe { &k.as_ref().data.assume_init_ref().key == key }
-        }) {
+        match self
+            .table
+            .find_entry(hash, |k| k.data(&self.nodes).key == *key)
+        {
             Ok(occupied) => {
                 let ptr = occupied.remove().0;
 
-                // SAFETY: We only store valid pointers into our own arena.
+                // SAFETY: We just removed ptr from our table, and we do not dereference
+                // it after this point.
                 let FreedSlot {
-                    prev,
-                    next,
                     data,
                     this,
-                    prev_raw,
-                    next_raw,
+                    prev_next,
                 } = unsafe { self.nodes.free_and_unlink(ptr) };
 
-                if self.head == Some(ptr) {
-                    self.head = next_raw;
-                }
-                if self.tail == Some(ptr) {
-                    self.tail = prev_raw;
+                if let Some((prev, next)) = prev_next {
+                    if let Some(head_tail) = self.head_tail.as_mut() {
+                        if head_tail.head == ptr {
+                            head_tail.head = next;
+                        }
+                        if head_tail.tail == ptr {
+                            head_tail.tail = prev;
+                        }
+                    }
+                } else if self
+                    .head_tail
+                    .as_ref()
+                    .is_some_and(|ht| ht.head == ptr || ht.tail == ptr)
+                {
+                    self.head_tail = None;
                 }
 
                 Some((
@@ -1864,8 +1806,8 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
                     RemovedEntry {
                         key: data.key,
                         value: data.value,
-                        prev,
-                        next,
+                        prev: prev_next.map(|(p, _)| p.this(&self.nodes)),
+                        next: prev_next.map(|(_, n)| n.this(&self.nodes)),
                     },
                 ))
             }
@@ -1910,14 +1852,8 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     pub fn get_ptr(&self, key: &K) -> Option<Ptr> {
         let hash = self.hasher.hash_one(key);
         self.table
-            .find(hash, |k| {
-                // SAFETY: We only store valid pointers into our own arena
-                unsafe { &k.as_ref().data.assume_init_ref().key == key }
-            })
-            .map(|ptr| {
-                // SAFETY: We only store valid pointers into our own arena
-                unsafe { ptr.as_ref().this }
-            })
+            .find(hash, |k| &k.data(&self.nodes).key == key)
+            .map(|ptr| ptr.this(&self.nodes))
     }
 
     /// Returns a reference to the value corresponding to the key.
@@ -1938,13 +1874,9 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     pub fn get(&self, key: &K) -> Option<&T> {
         self.table
             .find(self.hasher.hash_one(key), |k| {
-                // SAFETY: We only store valid pointers into our own arena
-                unsafe { &k.as_ref().data.assume_init_ref().key == key }
+                &k.data(&self.nodes).key == key
             })
-            .map(|&ptr| {
-                // SAFETY: We only store valid pointers into our own arena
-                unsafe { &ptr.as_ref().data.assume_init_ref().value }
-            })
+            .map(|ptr| &ptr.data(&self.nodes).value)
     }
 
     /// Returns a mutable reference to the value corresponding to the key.
@@ -1967,13 +1899,9 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     pub fn get_mut(&mut self, key: &K) -> Option<&mut T> {
         self.table
             .find_mut(self.hasher.hash_one(key), |k| {
-                // SAFETY: We only store valid pointers into our own arena
-                unsafe { &k.as_ref().data.assume_init_ref().key == key }
+                &k.data(&self.nodes).key == key
             })
-            .map(|ptr| {
-                // SAFETY: We only store valid pointers into our own arena
-                unsafe { &mut ptr.as_mut().data.assume_init_mut().value }
-            })
+            .map(|ptr| &mut ptr.data_mut(&mut self.nodes).value)
     }
 
     /// Returns `true` if the map contains a value for the specified key.
@@ -2024,7 +1952,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
 /// assert_eq!(map.get(&"a"), Some(&10));
 /// ```
 pub struct CursorMut<'m, K, T, S> {
-    ptr: Option<NonNull<LLSlot<K, T>>>,
+    ptr: Option<ActiveSlotRef<K, T>>,
     map: &'m mut LinkedHashMap<K, T, S>,
 }
 
@@ -2033,7 +1961,7 @@ impl<'m, K: Hash + Eq, T, S: BuildHasher> CursorMut<'m, K, T, S> {
     /// moves the cursor to the inserted or updated entry.
     pub fn insert_after_move_to(&mut self, key: K, value: T) -> Option<T> {
         let ptr = if self.ptr.is_none() {
-            self.map.tail
+            self.map.head_tail.as_ref().map(|ht| ht.tail)
         } else {
             self.ptr
         };
@@ -2042,27 +1970,16 @@ impl<'m, K: Hash + Eq, T, S: BuildHasher> CursorMut<'m, K, T, S> {
             Entry::Occupied(occupied_entry) => {
                 let mut map_ptr = *occupied_entry.entry.get();
                 if Some(map_ptr) != ptr {
-                    // SAFETY: Both `map_ptr` and `ptr` are guaranteed to be valid pointers within
-                    // the map's arena because they come from either existing entries or the
-                    // head/tail. We know our map is non-empty because we found
-                    // an occupied entry, so we know tail is non-null, meaning the or above cannot
-                    // yield null. We have also checked that they are not equal.
-                    unsafe { self.map.move_after_internal(map_ptr, ptr.unwrap()) };
+                    self.map.move_after_internal(map_ptr, ptr.unwrap());
                 }
                 self.ptr = Some(map_ptr);
-                // SAFETY: map_ptr was drawn from our own list of valid pointers.
-                unsafe {
-                    Some(core::mem::replace(
-                        &mut map_ptr.as_mut().data.assume_init_mut().value,
-                        value,
-                    ))
-                }
+                Some(core::mem::replace(
+                    &mut map_ptr.data_mut(&mut self.map.nodes).value,
+                    value,
+                ))
             }
             Entry::Vacant(vacant_entry) => {
-                // SAFETY: ptr is either null or from our own arena.
-                unsafe {
-                    self.ptr = Some(vacant_entry.insert_after_internal(value, ptr));
-                }
+                self.ptr = Some(vacant_entry.insert_after_internal(value, ptr).0);
                 None
             }
         }
@@ -2072,35 +1989,25 @@ impl<'m, K: Hash + Eq, T, S: BuildHasher> CursorMut<'m, K, T, S> {
     /// moves the cursor to the inserted or updated entry.
     pub fn insert_before_move_to(&mut self, key: K, value: T) -> Option<T> {
         let ptr = if self.ptr.is_none() {
-            self.map.head
+            self.map.head_tail.as_ref().map(|ht| ht.head)
         } else {
             self.ptr
         };
+
         match self.map.entry(key) {
             Entry::Occupied(occupied_entry) => {
                 let mut map_ptr = *occupied_entry.entry.get();
                 if Some(map_ptr) != ptr {
-                    // SAFETY: Both `map_ptr` and `ptr` are guaranteed to be valid pointers within
-                    // the map's arena because they come from either existing entries or the
-                    // head/tail. We know our map is non-empty because we found
-                    // an occupied entry, so we know head is non-null, meaning the or above cannot
-                    // yield null. We have also checked that they are not equal.
-                    unsafe { self.map.move_before_internal(map_ptr, ptr.unwrap()) };
+                    self.map.move_before_internal(map_ptr, ptr.unwrap());
                 }
                 self.ptr = Some(map_ptr);
-                // SAFETY: map_ptr was drawn from our own list of valid pointers.
-                unsafe {
-                    Some(core::mem::replace(
-                        &mut map_ptr.as_mut().data.assume_init_mut().value,
-                        value,
-                    ))
-                }
+                Some(core::mem::replace(
+                    &mut map_ptr.data_mut(&mut self.map.nodes).value,
+                    value,
+                ))
             }
             Entry::Vacant(vacant_entry) => {
-                // SAFETY: ptr is either null or from our own arena.
-                unsafe {
-                    self.ptr = Some(vacant_entry.insert_before_internal(value, ptr));
-                }
+                self.ptr = Some(vacant_entry.insert_before_internal(value, ptr).0);
                 None
             }
         }
@@ -2126,40 +2033,31 @@ impl<'m, K: Hash + Eq, T, S: BuildHasher> CursorMut<'m, K, T, S> {
 
 impl<'m, K: Hash + Eq, T, S: BuildHasher> CursorMut<'m, K, T, S> {
     /// Removes the entry before the cursor's current position and returns it.
-    pub fn remove_prev(&mut self) -> Option<RemovedEntry<K, T>> {
-        // SAFETY: We only store valid pointers into our own arena or null pointers, and
-        // we check for null.
-        unsafe {
-            let prev = self.ptr.map(|slot| slot.as_ref().links.prev())?;
-            Some(self.map.remove_ptr_internal(prev))
-        }
+    pub fn remove_prev(&mut self) -> Option<(Ptr, RemovedEntry<K, T>)> {
+        let prev = self.ptr.map(|slot| slot.prev(&self.map.nodes))?;
+        Some(self.map.remove_ptr_internal(prev))
     }
 
     /// Removes the entry after the cursor's current position and returns it.
-    pub fn remove_next(&mut self) -> Option<RemovedEntry<K, T>> {
-        // SAFETY: We only store valid pointers into our own arena or null pointers, and
-        // we check for null.
-        unsafe {
-            let next = self.ptr.map(|slot| slot.as_ref().links.next())?;
-            Some(self.map.remove_ptr_internal(next))
-        }
+    pub fn remove_next(&mut self) -> Option<(Ptr, RemovedEntry<K, T>)> {
+        let next = self.ptr.map(|slot| slot.next(&self.map.nodes))?;
+        Some(self.map.remove_ptr_internal(next))
     }
 
     /// Removes the entry at the cursor's current position and returns it.
-    pub fn remove(self) -> Option<RemovedEntry<K, T>> {
-        // SAFETY: We only store valid pointers into our own arena or null pointers, and
-        // we check for null.
-        unsafe { Some(self.map.remove_ptr_internal(self.ptr?)) }
+    pub fn remove(self) -> Option<(Ptr, RemovedEntry<K, T>)> {
+        let ptr = self.ptr?;
+        Some(self.map.remove_ptr_internal(ptr))
     }
 }
 
 impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     /// Returns an iterator starting from the cursor's current position.
-    pub fn iter(&self) -> Iter<'m, K, T, S> {
+    pub fn iter(&self) -> Iter<'_, K, T> {
         Iter {
             forward_ptr: self.ptr,
-            reverse_ptr: self.map.tail,
-            _map: core::marker::PhantomData,
+            reverse_ptr: self.ptr.map(|slot| slot.prev(&self.map.nodes)),
+            nodes: &self.map.nodes,
         }
     }
 
@@ -2167,41 +2065,36 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     /// linked list is **circular**, so moving next from the tail wraps around
     /// to the head.
     pub fn move_next(&mut self) {
-        // SAFETY: We only store valid pointers into our own arena or null pointers.
-        unsafe { self.ptr = self.ptr.map(|slot| slot.as_ref().links.next()) }
+        self.ptr = self.ptr.map(|slot| slot.next(&self.map.nodes));
     }
 
     /// Moves the cursor to the previous entry in the linked list. The internal
     /// linked list is **circular**, so moving previous from the head wraps
     /// around to the tail.
     pub fn move_prev(&mut self) {
-        // SAFETY: We only store valid pointers into our own arena or null pointers.
-        unsafe { self.ptr = self.ptr.map(|slot| slot.as_ref().links.prev()) }
+        self.ptr = self.ptr.map(|slot| slot.prev(&self.map.nodes));
     }
 
     /// Gets the current pointer of the cursor.
     pub fn ptr(&self) -> Option<Ptr> {
-        // SAFETY: We only store valid pointers into our own arena or null pointers.
-        unsafe { self.ptr.map(|slot| slot.as_ref().this) }
+        self.ptr.map(|slot| slot.this(&self.map.nodes))
     }
 
     /// Checks if the cursor is currently at the tail of the linked list.
     pub fn at_tail(&self) -> bool {
-        self.ptr == self.map.tail
+        self.ptr == self.map.head_tail.as_ref().map(|ht| ht.tail)
     }
 
     /// Checks if the cursor is currently at the head of the linked list.
     pub fn at_head(&self) -> bool {
-        self.ptr == self.map.head
+        self.ptr == self.map.head_tail.as_ref().map(|ht| ht.head)
     }
 
     /// Returns the entry at the cursor's current position.
     pub fn current(&self) -> Option<(&K, &T)> {
-        // SAFETY: We only store valid pointers into our own arena or null pointers.
-        unsafe {
-            let data = self.ptr?.as_ref().data.assume_init_ref();
-            Some((&data.key, &data.value))
-        }
+        let ptr = self.ptr?;
+        let data = ptr.data(&self.map.nodes);
+        Some((&data.key, &data.value))
     }
 
     /// Returns a mutable reference to the key-value pair at the cursor's
@@ -2232,11 +2125,9 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     /// assert_eq!(map.get(&"key"), Some(&100));
     /// ```
     pub fn current_mut(&mut self) -> Option<(&K, &mut T)> {
-        // SAFETY: We only store valid pointers into our own arena or null pointers.
-        unsafe {
-            let data = self.ptr?.as_mut().data.assume_init_mut();
-            Some(data.key_value_mut())
-        }
+        let mut ptr = self.ptr?;
+        let data = ptr.data_mut(&mut self.map.nodes);
+        Some((&data.key, &mut data.value))
     }
 
     /// Returns the pointer to the next entry in the linked list from the
@@ -2263,11 +2154,8 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     /// }
     /// ```
     pub fn next_ptr(&self) -> Option<Ptr> {
-        // SAFETY: We only store valid pointers into our own arena or null pointers.
-        unsafe {
-            self.ptr
-                .map(|slot| slot.as_ref().links.next().as_ref().this)
-        }
+        self.ptr
+            .map(|slot| slot.next(&self.map.nodes).this(&self.map.nodes))
     }
 
     /// Returns a reference to the key-value pair of the next entry in the
@@ -2360,11 +2248,8 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     /// }
     /// ```
     pub fn prev_ptr(&self) -> Option<Ptr> {
-        // SAFETY: We only store valid pointers into our own arena or null pointers.
-        unsafe {
-            self.ptr
-                .map(|slot| slot.as_ref().links.prev().as_ref().this)
-        }
+        self.ptr
+            .map(|slot| slot.prev(&self.map.nodes).this(&self.map.nodes))
     }
 
     /// Returns a reference to the key-value pair of the previous entry in the
@@ -2550,9 +2435,8 @@ where
 /// }
 /// ```
 pub struct OccupiedEntry<'a, K, T> {
-    entry: hash_table::OccupiedEntry<'a, NonNull<LLSlot<K, T>>>,
-    head: &'a mut Option<NonNull<LLSlot<K, T>>>,
-    tail: &'a mut Option<NonNull<LLSlot<K, T>>>,
+    entry: hash_table::OccupiedEntry<'a, ActiveSlotRef<K, T>>,
+    head_tail: &'a mut Option<HeadTail<K, T>>,
     arena: &'a mut Arena<K, T>,
 }
 
@@ -2576,8 +2460,7 @@ impl<'a, K, T> OccupiedEntry<'a, K, T> {
     /// }
     /// ```
     pub fn get(&self) -> &T {
-        // SAFETY: Node was obtained from our own arena and is guaranteed to be valid
-        unsafe { &self.entry.get().as_ref().data.assume_init_ref().value }
+        &self.entry.get().data(self.arena).value
     }
 
     /// Returns a mutable reference to the value in the entry.
@@ -2600,8 +2483,7 @@ impl<'a, K, T> OccupiedEntry<'a, K, T> {
     /// assert_eq!(map.get(&"key"), Some(&100));
     /// ```
     pub fn get_mut(&mut self) -> &mut T {
-        // SAFETY: Node was obtained from our own arena and is guaranteed to be valid
-        unsafe { &mut self.entry.get_mut().as_mut().data.assume_init_mut().value }
+        &mut self.entry.get_mut().data_mut(self.arena).value
     }
 
     /// Consumes the occupied entry and returns a mutable reference to the
@@ -2611,11 +2493,7 @@ impl<'a, K, T> OccupiedEntry<'a, K, T> {
     /// borrow.
     pub fn into_mut(self) -> &'a mut T {
         let OccupiedEntry { entry, .. } = self;
-        unsafe {
-            // SAFETY: Node was obtained from our own arena and is guaranteed to be valid,
-            // we tie the lifetime to the arena so it cannot outlive the arena.
-            &mut entry.into_mut().as_mut().data.assume_init_mut().value
-        }
+        &mut entry.into_mut().data_mut(self.arena).value
     }
 
     /// Replaces the entry's value and returns the old value without moving the
@@ -2655,13 +2533,7 @@ impl<'a, K, T> OccupiedEntry<'a, K, T> {
     /// assert_eq!(entries, [(&"a", &10), (&"b", &2)]);
     /// ```
     pub fn insert_no_move(mut self, value: T) -> T {
-        // SAFETY: Node was obtained from our own arena and is guaranteed to be valid
-        unsafe {
-            core::mem::replace(
-                &mut self.entry.get_mut().as_mut().data.assume_init_mut().value,
-                value,
-            )
-        }
+        core::mem::replace(&mut self.entry.get_mut().data_mut(self.arena).value, value)
     }
 
     /// Returns the pointer to this entry.
@@ -2691,8 +2563,7 @@ impl<'a, K, T> OccupiedEntry<'a, K, T> {
     /// }
     /// ```
     pub fn ptr(&self) -> Ptr {
-        // SAFETY: Node was obtained from our own arena and is guaranteed to be valid
-        unsafe { self.entry.get().as_ref().this }
+        self.entry.get().this(self.arena)
     }
 
     /// Returns a reference to the key in the entry.
@@ -2714,8 +2585,7 @@ impl<'a, K, T> OccupiedEntry<'a, K, T> {
     /// }
     /// ```
     pub fn key(&self) -> &K {
-        // SAFETY: Node was obtained from our own arena and is guaranteed to be valid
-        unsafe { &self.entry.get().as_ref().data.assume_init_ref().key }
+        &self.entry.get().data(self.arena).key
     }
 
     /// Replaces the entry's value and returns the old value.
@@ -2783,21 +2653,28 @@ impl<'a, K, T> OccupiedEntry<'a, K, T> {
     /// assert_eq!(map.len(), 0);
     /// ```
     pub fn remove_entry(self) -> (K, T) {
-        // SAFETY: We only store valid pointers into our own arena, and self.node was
-        // drawn from the known-good list in our own hashtable. We do not access the
-        // data in self.node after this.
         let entry = self.entry.remove().0;
+        // SAFETY: We just removed `entry` from the hash table, and we don't deref it
+        // after this.
         let FreedSlot {
-            data,
-            prev_raw,
-            next_raw,
-            ..
+            data, prev_next, ..
         } = unsafe { self.arena.free_and_unlink(entry) };
-        if *self.head == Some(entry) {
-            *self.head = next_raw;
-        }
-        if *self.tail == Some(entry) {
-            *self.tail = prev_raw;
+
+        if let Some((prev, next)) = prev_next {
+            if let Some(head_tail) = self.head_tail {
+                if head_tail.head == entry {
+                    head_tail.head = next;
+                }
+                if head_tail.tail == entry {
+                    head_tail.tail = prev;
+                }
+            }
+        } else if self
+            .head_tail
+            .as_ref()
+            .is_some_and(|ht| ht.head == entry || ht.tail == entry)
+        {
+            *self.head_tail = None;
         }
 
         (data.key, data.value)
@@ -2855,10 +2732,9 @@ impl<'a, K, T> OccupiedEntry<'a, K, T> {
 /// ```
 pub struct VacantEntry<'a, K, T> {
     key: K,
-    entry: hash_table::VacantEntry<'a, NonNull<LLSlot<K, T>>>,
+    entry: hash_table::VacantEntry<'a, ActiveSlotRef<K, T>>,
     nodes: &'a mut Arena<K, T>,
-    head: &'a mut Option<NonNull<LLSlot<K, T>>>,
-    tail: &'a mut Option<NonNull<LLSlot<K, T>>>,
+    head_tail: &'a mut Option<HeadTail<K, T>>,
 }
 
 impl<'a, K: Hash + Eq, T> VacantEntry<'a, K, T> {
@@ -2889,13 +2765,9 @@ impl<'a, K: Hash + Eq, T> VacantEntry<'a, K, T> {
     /// }
     /// ```
     pub fn insert_tail(self, value: T) -> (Ptr, &'a mut T) {
-        let after = *self.tail;
-        // SAFETY: `after` came from self.tail, which is either null or valid.
-        unsafe {
-            let mut ptr = self.insert_after_internal(value, after);
-            let external_ptr = ptr.as_ref().this;
-            (external_ptr, &mut ptr.as_mut().data.assume_init_mut().value)
-        }
+        let after = self.head_tail.as_ref().map(|ht| ht.tail);
+        let (_, ptr, data) = self.insert_after_internal(value, after);
+        (ptr, data)
     }
 
     /// Inserts a new entry without linking it to the doubly-linked list.
@@ -2925,13 +2797,7 @@ impl<'a, K: Hash + Eq, T> VacantEntry<'a, K, T> {
     pub fn push_unlinked(self, value: T) -> (Ptr, &'a mut T) {
         let mut ptr = self.nodes.alloc_circular(self.key, value);
         self.entry.insert(ptr);
-        // SAFETY: We just allocated ptr above, so it must be valid. We tie the returned
-        // mutable reference to the lifetime of self.nodes, so it cannot outlive the
-        // arena.
-        unsafe {
-            let external_ptr = ptr.as_ref().this;
-            (external_ptr, &mut ptr.as_mut().data.assume_init_mut().value)
-        }
+        (ptr.this(self.nodes), &mut ptr.data_mut(self.nodes).value)
     }
 
     /// Inserts a new entry immediately after the specified entry.
@@ -2967,49 +2833,53 @@ impl<'a, K: Hash + Eq, T> VacantEntry<'a, K, T> {
     /// assert_eq!(entries, [(&"first", &1), (&"second", &2), (&"third", &3)]);
     /// ```
     pub fn insert_after(self, value: T, after: Ptr) -> (Ptr, &'a mut T) {
-        let after = self.nodes.map_ptr(after).or(*self.tail);
+        let after = self
+            .nodes
+            .map_ptr(after)
+            .or(self.head_tail.as_ref().map(|ht| ht.tail));
 
-        // SAFETY: `after` was either obtained from self.tail, which is either null or
-        // valid, or it was mapped from a user-provided Ptr using self.nodes.map_ptr,
-        // which returns None if the Ptr is invalid, so we fall back to self.tail in
-        // that case.
-        unsafe {
-            let mut ptr = self.insert_after_internal(value, after);
-            let external_ptr = ptr.as_ref().this;
-            (external_ptr, &mut ptr.as_mut().data.assume_init_mut().value)
-        }
+        let (_, ptr, data) = self.insert_after_internal(value, after);
+        (ptr, data)
     }
 
-    // SAFETY: `after` must be either null or a valid pointer into self.nodes.
-    unsafe fn insert_after_internal(
+    fn insert_after_internal(
         self,
         value: T,
-        after: Option<NonNull<LLSlot<K, T>>>,
-    ) -> NonNull<LLSlot<K, T>> {
+        after: Option<ActiveSlotRef<K, T>>,
+    ) -> (ActiveSlotRef<K, T>, Ptr, &'a mut T) {
         if let Some(mut after) = after {
-            // SAFETY: Per contract, after is valid, so its next pointer must also be valid.
-            let mut after_next = unsafe { after.as_ref().links.next() };
-            let ptr = self.nodes.alloc(self.key, value, after, after_next);
+            let mut after_next = after.next(self.nodes);
+            let mut ptr = self.nodes.alloc(self.key, value, after, after_next);
 
-            // SAFETY: after and after_next are valid, so updating their pointers is safe.
-            unsafe {
-                *after.as_mut().links.next_mut() = ptr;
-                *after_next.as_mut().links.prev_mut() = ptr;
-            }
+            *after.next_mut(self.nodes) = ptr;
+            *after_next.prev_mut(self.nodes) = ptr;
             self.entry.insert(ptr);
 
-            if *self.tail == Some(after) {
-                *self.tail = Some(ptr);
+            if let Some(head_tail) = self.head_tail.as_mut()
+                && head_tail.tail == after
+            {
+                head_tail.tail = ptr;
             }
-            ptr
+
+            (
+                ptr,
+                ptr.this(self.nodes),
+                &mut ptr.data_mut(self.nodes).value,
+            )
         } else {
-            debug_assert_eq!(*self.head, None);
-            let ptr = self.nodes.alloc_circular(self.key, value);
+            debug_assert_eq!(*self.head_tail, None);
+            let mut ptr = self.nodes.alloc_circular(self.key, value);
 
-            *self.head = Some(ptr);
-            *self.tail = *self.head;
+            *self.head_tail = Some(HeadTail {
+                head: ptr,
+                tail: ptr,
+            });
             self.entry.insert(ptr);
-            ptr
+            (
+                ptr,
+                ptr.this(self.nodes),
+                &mut ptr.data_mut(self.nodes).value,
+            )
         }
     }
 
@@ -3034,7 +2904,7 @@ impl<'a, K: Hash + Eq, T> VacantEntry<'a, K, T> {
     ///
     /// match map.entry("first") {
     ///     Entry::Vacant(entry) => {
-    ///         let ptr = entry.insert_head(1);
+    ///         let ptr = entry.insert_head(1).0;
     ///         assert_eq!(map.ptr_get(ptr), Some(&1));
     ///     }
     ///     Entry::Occupied(_) => unreachable!(),
@@ -3044,10 +2914,10 @@ impl<'a, K: Hash + Eq, T> VacantEntry<'a, K, T> {
     /// let entries: Vec<_> = map.iter().collect();
     /// assert_eq!(entries, [(&"first", &1), (&"second", &2)]);
     /// ```
-    pub fn insert_head(self, value: T) -> Ptr {
-        let ptr = *self.head;
-        // SAFETY: `ptr` came from self.head, which is either null or valid.
-        unsafe { self.insert_before_internal(value, ptr).as_ref().this }
+    pub fn insert_head(self, value: T) -> (Ptr, &'a mut T) {
+        let ptr = self.head_tail.as_ref().map(|ht| ht.head);
+        let (_, ptr, data) = self.insert_before_internal(value, ptr);
+        (ptr, data)
     }
 
     /// Inserts a new entry immediately before the specified entry.
@@ -3083,52 +2953,56 @@ impl<'a, K: Hash + Eq, T> VacantEntry<'a, K, T> {
     /// assert_eq!(entries, [(&"first", &1), (&"second", &2), (&"third", &3)]);
     /// ```
     pub fn insert_before(self, value: T, before: Ptr) -> (Ptr, &'a mut T) {
-        let before = self.nodes.map_ptr(before).or(*self.head);
+        let before = self
+            .nodes
+            .map_ptr(before)
+            .or(self.head_tail.as_ref().map(|ht| ht.head));
 
-        // SAFETY: `before` was either obtained from self.head, which is either null or
-        // valid, or it was mapped from a user-provided Ptr using self.nodes.map_ptr
-        // which returns None if the Ptr is invalid, so we fall back to self.head in
-        // that case.
-        unsafe {
-            let mut ptr = self.insert_before_internal(value, before);
-            let external_ptr = ptr.as_ref().this;
-            (external_ptr, &mut ptr.as_mut().data.assume_init_mut().value)
-        }
+        let (_, ptr, data) = self.insert_before_internal(value, before);
+        (ptr, data)
     }
 
     /// # Safety
     ///
     /// `before` must be either null or a valid pointer into self.nodes.
-    unsafe fn insert_before_internal(
+    fn insert_before_internal(
         self,
         value: T,
-        before: Option<NonNull<LLSlot<K, T>>>,
-    ) -> NonNull<LLSlot<K, T>> {
+        before: Option<ActiveSlotRef<K, T>>,
+    ) -> (ActiveSlotRef<K, T>, Ptr, &'a mut T) {
         if let Some(mut before) = before {
-            // SAFETY: Per contract, before is valid, so its prev pointer must also be
-            // valid.
-            let mut before_prev = unsafe { before.as_ref().links.prev() };
-            let ptr = self.nodes.alloc(self.key, value, before_prev, before);
+            let mut before_prev = before.prev(self.nodes);
+            let mut ptr = self.nodes.alloc(self.key, value, before_prev, before);
 
-            // SAFETY: before and before_prev are valid, so updating their pointers is safe.
-            unsafe {
-                *before.as_mut().links.prev_mut() = ptr;
-                *before_prev.as_mut().links.next_mut() = ptr;
-            }
+            *before.prev_mut(self.nodes) = ptr;
+            *before_prev.next_mut(self.nodes) = ptr;
             self.entry.insert(ptr);
 
-            if *self.head == Some(before) {
-                *self.head = Some(ptr);
+            if let Some(head_tail) = self.head_tail.as_mut()
+                && head_tail.head == before
+            {
+                head_tail.head = ptr;
             }
-            ptr
+
+            (
+                ptr,
+                ptr.this(self.nodes),
+                &mut ptr.data_mut(self.nodes).value,
+            )
         } else {
-            debug_assert_eq!(*self.tail, None);
-            let ptr = self.nodes.alloc_circular(self.key, value);
+            debug_assert_eq!(*self.head_tail, None);
+            let mut ptr = self.nodes.alloc_circular(self.key, value);
 
-            *self.tail = Some(ptr);
-            *self.head = *self.tail;
+            *self.head_tail = Some(HeadTail {
+                head: ptr,
+                tail: ptr,
+            });
             self.entry.insert(ptr);
-            ptr
+            (
+                ptr,
+                ptr.this(self.nodes),
+                &mut ptr.data_mut(self.nodes).value,
+            )
         }
     }
 
@@ -3207,55 +3081,43 @@ impl<'a, K: Hash + Eq, T> VacantEntry<'a, K, T> {
 ///     println!("{}: {}", key, value);
 /// }
 /// ```
-pub struct Iter<'a, K, T, S> {
-    forward_ptr: Option<NonNull<LLSlot<K, T>>>,
-    reverse_ptr: Option<NonNull<LLSlot<K, T>>>,
-    _map: PhantomData<&'a LinkedHashMap<K, T, S>>,
+pub struct Iter<'a, K, T> {
+    forward_ptr: Option<ActiveSlotRef<K, T>>,
+    reverse_ptr: Option<ActiveSlotRef<K, T>>,
+    nodes: &'a Arena<K, T>,
 }
 
-impl<'a, K, T, S> Iterator for Iter<'a, K, T, S> {
+impl<'a, K, T> Iterator for Iter<'a, K, T> {
     type Item = (&'a K, &'a T);
 
     fn next(&mut self) -> Option<Self::Item> {
         let ptr = self.forward_ptr?;
-        // SAFETY: We are iterating over our own pointers which we know are valid.
-        // We tie the lifetime to our immutable borrow of the map.
-        let as_ref = unsafe { ptr.as_ref() };
         if self.forward_ptr == self.reverse_ptr {
             self.forward_ptr = None;
             self.reverse_ptr = None;
         } else {
-            // SAFETY: We are iterating over our own pointers which we know are valid.
-            self.forward_ptr = unsafe { Some(as_ref.links.next()) };
+            self.forward_ptr = Some(ptr.next(self.nodes));
         }
 
-        // SAFETY: We are iterating over our own pointers which we know are valid.
-        unsafe {
-            let data = as_ref.data.assume_init_ref();
-            Some((&data.key, &data.value))
-        }
+        let data = ptr.data(self.nodes);
+
+        Some((&data.key, &data.value))
     }
 }
 
-impl<'a, K, T, S> DoubleEndedIterator for Iter<'a, K, T, S> {
+impl<'a, K, T> DoubleEndedIterator for Iter<'a, K, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
         let ptr = self.reverse_ptr?;
-        // SAFETY: We are iterating over our own pointers which we know are valid.
-        // We tie the lifetime to our immutable borrow of the map.
-        let as_ref = unsafe { ptr.as_ref() };
         if self.reverse_ptr == self.forward_ptr {
             self.reverse_ptr = None;
             self.forward_ptr = None;
         } else {
-            // SAFETY: We are iterating over our own pointers which we know are valid.
-            self.reverse_ptr = unsafe { Some(as_ref.links.prev()) };
+            self.reverse_ptr = Some(ptr.prev(self.nodes));
         }
 
-        // SAFETY: We are iterating over our own pointers which we know are valid.
-        unsafe {
-            let data = as_ref.data.assume_init_ref();
-            Some((&data.key, &data.value))
-        }
+        let data = ptr.data(self.nodes);
+
+        Some((&data.key, &data.value))
     }
 }
 
@@ -3282,9 +3144,9 @@ impl<'a, K, T, S> DoubleEndedIterator for Iter<'a, K, T, S> {
 /// }
 /// ```
 pub struct IntoIter<K, T> {
-    nodes: Arena<K, T>,
-    forward_ptr: Option<NonNull<LLSlot<K, T>>>,
-    reverse_ptr: Option<NonNull<LLSlot<K, T>>>,
+    nodes: ArenaContainer<K, T>,
+    forward_ptr: Option<ActiveSlotRef<K, T>>,
+    reverse_ptr: Option<ActiveSlotRef<K, T>>,
 }
 
 impl<K, T> Iterator for IntoIter<K, T> {
@@ -3296,12 +3158,10 @@ impl<K, T> Iterator for IntoIter<K, T> {
             self.forward_ptr = None;
             self.reverse_ptr = None;
         } else {
-            // SAFETY: We only store valid pointers into our own arena.
-            self.forward_ptr = unsafe { Some(ptr.as_ref().links.next()) };
+            self.forward_ptr = Some(ptr.next(&self.nodes));
         }
 
-        // SAFETY: We only store valid pointers into our own arena. We do not access the
-        // pointer after this call.
+        // SAFETY: We do not access the pointer after this call.
         let data = unsafe { self.nodes.free_and_unlink(ptr).data };
         Some((data.key, data.value))
     }
@@ -3314,12 +3174,10 @@ impl<K, T> DoubleEndedIterator for IntoIter<K, T> {
             self.reverse_ptr = None;
             self.forward_ptr = None;
         } else {
-            // SAFETY: We only store valid pointers into our own arena.
-            self.reverse_ptr = unsafe { Some(ptr.as_ref().links.prev()) };
+            self.reverse_ptr = Some(ptr.prev(&self.nodes));
         }
 
-        // SAFETY: We only store valid pointers into our own arena. We do not access the
-        // pointer after this call.
+        // SAFETY: We do not access the pointer after this call.
         let data = unsafe { self.nodes.free_and_unlink(ptr).data };
         Some((data.key, data.value))
     }
@@ -3350,8 +3208,8 @@ impl<K, T> DoubleEndedIterator for IntoIter<K, T> {
 /// assert_eq!(map.get(&"b"), Some(&4));
 /// ```
 pub struct IterMut<'a, K, T> {
-    forward_ptr: Option<NonNull<LLSlot<K, T>>>,
-    reverse_ptr: Option<NonNull<LLSlot<K, T>>>,
+    forward_ptr: Option<ActiveSlotRef<K, T>>,
+    reverse_ptr: Option<ActiveSlotRef<K, T>>,
     _nodes: PhantomData<&'a mut Arena<K, T>>,
 }
 
@@ -3390,17 +3248,25 @@ impl<'a, K, T> Iterator for IterMut<'a, K, T> {
         // SAFETY: We yield exactly one item per ptr. Our ptrs are unique. We trust the
         // pointers we are iterating over came from our arena. We tie the lifetime to
         // our mutable borrow of the arena.
-        let node_mut = unsafe { self.forward_ptr?.as_mut() };
+        let node_mut = unsafe { self.forward_ptr?.as_ptr().as_mut() };
         if self.forward_ptr == self.reverse_ptr {
             self.forward_ptr = None;
             self.reverse_ptr = None;
         } else {
             // SAFETY: We are iterating over our own pointers which we know are valid.
-            self.forward_ptr = unsafe { Some(node_mut.links.next()) };
+            self.forward_ptr = unsafe {
+                Some(match node_mut.links {
+                    Links::Occupied { next, .. } => next,
+                    Links::Vacant { .. } => unreachable_unchecked(),
+                })
+            };
         }
 
         // SAFETY: See above.
-        unsafe { Some(node_mut.data.assume_init_mut().key_value_mut()) }
+        unsafe {
+            let data = node_mut.data.assume_init_mut();
+            Some((&data.key, &mut data.value))
+        }
     }
 }
 
@@ -3409,17 +3275,25 @@ impl<'a, K, T> DoubleEndedIterator for IterMut<'a, K, T> {
         // SAFETY: We yield exactly one item per ptr. Our ptrs are unique. We trust the
         // pointers we are iterating over came from our arena. We tie the lifetime to
         // our mutable borrow of the arena.
-        let node_mut = unsafe { self.reverse_ptr?.as_mut() };
+        let node_mut = unsafe { self.reverse_ptr?.as_ptr().as_mut() };
         if self.reverse_ptr == self.forward_ptr {
             self.reverse_ptr = None;
             self.forward_ptr = None;
         } else {
             // SAFETY: We are iterating over our own pointers which we know are valid.
-            self.reverse_ptr = unsafe { Some(node_mut.links.prev()) };
+            self.reverse_ptr = unsafe {
+                Some(match node_mut.links {
+                    Links::Occupied { prev, .. } => prev,
+                    Links::Vacant { .. } => unreachable_unchecked(),
+                })
+            };
         }
 
         // SAFETY: See above.
-        unsafe { Some(node_mut.data.assume_init_mut().key_value_mut()) }
+        unsafe {
+            let data = node_mut.data.assume_init_mut();
+            Some((&data.key, &mut data.value))
+        }
     }
 }
 
@@ -3643,7 +3517,7 @@ mod tests {
         map.insert_tail(2, vec![2]);
         map.insert_tail(3, vec![3]);
 
-        let removed = map.remove_with_ptr(&2).unwrap().1;
+        let removed = map.remove_full(&2).unwrap().1;
         assert_eq!(
             removed,
             RemovedEntry {
@@ -3659,7 +3533,7 @@ mod tests {
         let items: Vec<_> = map.iter().collect();
         assert_eq!(items, vec![(&1, &vec![1]), (&3, &vec![3])]);
 
-        let removed = map.remove_with_ptr(&1).unwrap().1;
+        let removed = map.remove_full(&1).unwrap().1;
         assert_eq!(
             removed,
             RemovedEntry {
@@ -3672,7 +3546,7 @@ mod tests {
         assert_eq!(map.len(), 1);
         assert_eq!(map.head_ptr(), map.tail_ptr());
 
-        let removed = map.remove_with_ptr(&3).unwrap().1;
+        let removed = map.remove_full(&3).unwrap().1;
         assert_eq!(
             removed,
             RemovedEntry {
@@ -3746,7 +3620,7 @@ mod tests {
         assert_eq!(map.len(), 1);
         assert_eq!(map.head_ptr(), map.tail_ptr());
 
-        let removed = map.remove_with_ptr(&42).unwrap().1;
+        let removed = map.remove_full(&42).unwrap().1;
         assert_eq!(
             removed,
             RemovedEntry {
@@ -3768,7 +3642,7 @@ mod tests {
             map.insert_tail(i, vec![1]);
         }
 
-        let removed = map.remove_with_ptr(&1).unwrap().1;
+        let removed = map.remove_full(&1).unwrap().1;
         assert_eq!(
             removed,
             RemovedEntry {
@@ -3780,7 +3654,7 @@ mod tests {
         );
         assert_eq!(map.tail_ptr(), map.get_ptr(&5));
 
-        let removed = map.remove_with_ptr(&5).unwrap().1;
+        let removed = map.remove_full(&5).unwrap().1;
         assert_eq!(
             removed,
             RemovedEntry {
@@ -3836,6 +3710,7 @@ mod tests {
         map.move_to_tail(ptr2);
 
         let items: Vec<_> = map.iter().map(|(k, _)| *k).collect();
+        dbg!(&map);
         assert_eq!(items, vec![1, 3, 4, 2]);
         assert_eq!(map.tail_ptr(), Some(ptr2));
 
@@ -4304,7 +4179,7 @@ mod tests {
         assert_eq!(old_value, None);
 
         let items: Vec<_> = cursor.iter().map(|(k, _)| *k).collect();
-        assert_eq!(items, vec![2, 3]);
+        assert_eq!(items, vec![2, 3, 1]);
 
         let old_value = cursor.insert_after_move_to(2, vec![2]);
         assert_eq!(old_value, Some(vec![2]));
@@ -4324,7 +4199,7 @@ mod tests {
         assert_eq!(old_value, None);
 
         let items: Vec<_> = cursor.iter().map(|(k, _)| *k).collect();
-        assert_eq!(items, vec![2, 3]);
+        assert_eq!(items, vec![2, 3, 1]);
 
         let old_value = cursor.insert_before_move_to(2, vec![2]);
         assert_eq!(old_value, Some(vec![2]));
@@ -4341,37 +4216,37 @@ mod tests {
 
         let mut cursor = map.key_cursor_mut(&3);
 
-        let removed = cursor.remove_next();
+        let (_, removed) = cursor.remove_next().unwrap();
         assert_eq!(
             removed,
-            Some(RemovedEntry {
+            RemovedEntry {
                 key: 4,
                 value: "value4".to_string(),
                 prev: cursor.get_ptr(&3),
                 next: cursor.get_ptr(&5),
-            })
+            }
         );
 
-        let removed = cursor.remove_prev();
+        let (_, removed) = cursor.remove_prev().unwrap();
         assert_eq!(
             removed,
-            Some(RemovedEntry {
+            RemovedEntry {
                 key: 2,
                 value: "value2".to_string(),
                 prev: cursor.get_ptr(&1),
                 next: cursor.get_ptr(&3),
-            })
+            }
         );
 
-        let removed = cursor.remove();
+        let (_, removed) = cursor.remove().unwrap();
         assert_eq!(
             removed,
-            Some(RemovedEntry {
+            RemovedEntry {
                 key: 3,
                 value: "value3".to_string(),
                 prev: map.get_ptr(&1),
                 next: map.get_ptr(&5),
-            })
+            }
         );
         assert!(!map.contains_key(&3));
 
@@ -4386,15 +4261,15 @@ mod tests {
         map.insert_tail(2, vec![2]);
 
         let cursor = map.key_cursor_mut(&1);
-        let removed = cursor.remove();
+        let (_, removed) = cursor.remove().unwrap();
         assert_eq!(
             removed,
-            Some(RemovedEntry {
+            RemovedEntry {
                 key: 1,
                 value: vec![1],
                 prev: map.get_ptr(&2),
                 next: map.get_ptr(&2),
-            })
+            }
         );
 
         assert_eq!(map.len(), 1);
@@ -4542,6 +4417,7 @@ mod tests {
         if let Some(ptr) = map.get_ptr(&1) {
             map.move_to_tail(ptr);
         }
+        dbg!(&map);
 
         let items: Vec<_> = map.iter().map(|(k, _)| *k).collect();
         let head_key = map.ptr_get_entry(map.head_ptr().unwrap()).map(|(k, _)| *k);
@@ -5079,17 +4955,17 @@ mod tests {
         let (ptr2, _) = map.insert_tail_full("b", 2);
         map.insert_tail_full("c", 3);
 
-        let removed = map.remove_head().unwrap();
+        let (_, removed) = map.remove_head().unwrap();
         assert_eq!(removed.key, "a");
         assert_eq!(removed.value, 1);
         assert_eq!(map.len(), 2);
 
-        let removed = map.remove_tail().unwrap();
+        let (_, removed) = map.remove_tail().unwrap();
         assert_eq!(removed.key, "c");
         assert_eq!(removed.value, 3);
         assert_eq!(map.len(), 1);
 
-        let (removed_ptr, removed_entry) = map.remove_with_ptr(&"b").unwrap();
+        let (removed_ptr, removed_entry) = map.remove_full(&"b").unwrap();
         assert_eq!(removed_ptr, ptr2);
         assert_eq!(removed_entry.key, "b");
         assert_eq!(removed_entry.value, 2);
@@ -5097,7 +4973,7 @@ mod tests {
 
         assert_eq!(map.remove_head(), None);
         assert_eq!(map.remove_tail(), None);
-        assert_eq!(map.remove_with_ptr(&"nonexistent"), None);
+        assert_eq!(map.remove_full(&"nonexistent"), None);
     }
 
     #[test]
@@ -5237,21 +5113,21 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "no entry found for key")]
+    #[should_panic]
     fn test_index_key_panic_on_missing() {
         let map: LinkedHashMap<&str, i32> = LinkedHashMap::default();
         let _ = map[&"missing"];
     }
 
     #[test]
-    #[should_panic(expected = "no entry found for key")]
+    #[should_panic]
     fn test_index_key_mut_panic_on_missing() {
         let mut map: LinkedHashMap<&str, i32> = LinkedHashMap::default();
         map[&"missing"] = 1;
     }
 
     #[test]
-    #[should_panic(expected = "Invalid Ptr")]
+    #[should_panic]
     fn test_index_ptr_panic_after_removal() {
         let mut map = LinkedHashMap::default();
         let (ptr, _) = map.insert_tail_full("a", 1);
