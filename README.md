@@ -47,6 +47,29 @@ let keys: Vec<_> = map.iter().map(|(k, _)| *k).collect();
 assert_eq!(keys, ["second", "zeroth", "first"]);
 ```
 
+## LRU Example
+```rust
+use tether_map::LinkedHashMap;
+let mut lru = LinkedHashMap::new();
+lru.insert_tail("a", 1);
+lru.insert_tail("b", 2);
+lru.insert_tail("c", 3);
+assert_eq!(lru.len(), 3);
+
+// Access "a" and move to most-recent position
+if let Some(ptr) = lru.get_ptr(&"a") {
+	lru.move_to_tail(ptr);
+}		
+assert_eq!(lru.iter().map(|(k, _)| *k).collect::<Vec<_>>(), ["b", "c", "a"]);
+// Insert "d", evicting the least-recently used entry ("b")
+lru.insert_tail("d", 4);
+if lru.len() > 3 {
+	let (_, removed_entry) = lru.remove_head().unwrap();
+	println!("Evicted {}", removed_entry.key);
+}
+assert_eq!(lru.iter().map(|(k, _)| *k).collect::<Vec<_>>(), ["c", "a", "d"]);
+```
+
 ## API highlights
 
 - Insertion positions:
@@ -62,23 +85,6 @@ assert_eq!(keys, ["second", "zeroth", "first"]);
 	- `CursorMut` supports navigation and in-place edits without extra lookups
 - Iteration:
 	- `iter`, `iter_mut`, `keys`, `values`, `values_mut` (double-ended where applicable)
-
-## Example: simple LRU-ish refresh on access
-
-```rust
-use tether_map::LinkedHashMap;
-
-let mut map = LinkedHashMap::new();
-for k in ["a", "b", "c", "d"] { map.insert_tail(k, 0); }
-
-// Access moves to most-recent position
-if let Some(ptr) = map.get_ptr(&"b") {
-    map.move_to_tail(ptr);
-}
-
-let order: Vec<_> = map.iter().map(|(k, _)| *k).collect();
-assert_eq!(order, ["a", "c", "d", "b"]);
-```
 
 ## no_std
 
@@ -116,7 +122,7 @@ microbenchmarks this yields over 2× performance in hot paths compared to fully 
 
 Dual-licensed under either of:
 
-- Apache License, Version 2.0 (LICENSE-APACHE or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license (LICENSE-MIT or http://opensource.org/licenses/MIT)
+- Apache License, Version 2.0
+- MIT license
 
 at your option.
