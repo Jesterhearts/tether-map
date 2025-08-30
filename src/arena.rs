@@ -12,7 +12,7 @@ use bumpalo::Bump;
 use crate::Ptr;
 
 #[cfg(debug_assertions)]
-pub(crate) type ArenaContainer<K, T> = Box<Arena<K, T>>;
+pub(crate) type ArenaContainer<K, T> = alloc::boxed::Box<Arena<K, T>>;
 #[cfg(not(debug_assertions))]
 pub(crate) type ArenaContainer<K, T> = Arena<K, T>;
 
@@ -263,7 +263,7 @@ impl<K, T> Arena<K, T> {
     pub(crate) fn with_capacity(capacity: usize) -> ArenaContainer<K, T> {
         #[cfg(debug_assertions)]
         {
-            Box::new(Self {
+            alloc::boxed::Box::new(Self {
                 bump: Bump::with_capacity(capacity * core::mem::size_of::<LLSlot<K, T>>()),
                 slots: Vec::with_capacity(capacity),
                 free_list_head: None,
