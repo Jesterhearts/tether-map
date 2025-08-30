@@ -7,6 +7,7 @@ An order-preserving hash map built on an intrusive doubly‑linked list with O(1
 - O(1) reordering: move entries to head/tail or before/after any other entry
 - Cursor API for in-place navigation and mutation
 - `no_std` compatible (needs `alloc`)
+- Maximum capacity of 2^32 - 1 entries.
 - Safe public API; `unsafe` only in well-audited internals
 
 ## Install
