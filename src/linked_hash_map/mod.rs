@@ -23,6 +23,7 @@ pub(crate) mod entry;
 pub(crate) mod iter;
 
 use alloc::vec::Vec;
+use core::borrow::Borrow;
 use core::clone::Clone;
 use core::cmp::Eq;
 use core::fmt::Debug;
@@ -32,6 +33,7 @@ use core::ops::Index;
 use core::ops::IndexMut;
 use core::panic;
 
+use hashbrown::Equivalent;
 use hashbrown::HashTable;
 use hashbrown::hash_table;
 
@@ -1686,11 +1688,14 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// }
     /// ```
     #[inline]
-    pub fn key_cursor_mut(&'_ mut self, key: &K) -> CursorMut<'_, K, T, S> {
+    pub fn key_cursor_mut<Q>(&'_ mut self, key: &Q) -> CursorMut<'_, K, T, S>
+    where
+        Q: Equivalent<K> + Hash + Borrow<K>,
+    {
         let hash = self.hasher.hash_one(key);
         let ptr = self
             .table
-            .find(hash, |k| &k.data(&self.nodes).key == key)
+            .find(hash, |k| k.data(&self.nodes).key.equivalent(key))
             .copied();
         CursorMut { ptr, map: self }
     }
@@ -1778,7 +1783,10 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// assert_eq!(map.remove(&1), None);
     /// ```
     #[inline]
-    pub fn remove(&mut self, key: &K) -> Option<T> {
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<T>
+    where
+        Q: Equivalent<K> + Hash + Borrow<K>,
+    {
         self.remove_entry(key).map(|(_, v)| v)
     }
 
@@ -1796,7 +1804,10 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// assert_eq!(map.remove(&1), None);
     /// ```
     #[inline]
-    pub fn remove_entry(&mut self, key: &K) -> Option<(K, T)> {
+    pub fn remove_entry<Q>(&mut self, key: &Q) -> Option<(K, T)>
+    where
+        Q: Equivalent<K> + Hash + Borrow<K>,
+    {
         let (_, removed) = self.remove_full(key)?;
         Some((removed.key, removed.value))
     }
@@ -1837,7 +1848,10 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// assert_eq!(map.remove_full(&"b"), None);
     /// ```
     #[inline]
-    pub fn remove_full(&mut self, key: &K) -> Option<(Ptr, RemovedEntry<K, T>)> {
+    pub fn remove_full<Q>(&mut self, key: &Q) -> Option<(Ptr, RemovedEntry<K, T>)>
+    where
+        Q: Equivalent<K> + Hash + Borrow<K>,
+    {
         if self.is_empty() {
             return None;
         }
@@ -1845,7 +1859,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
         let hash = self.hasher.hash_one(key);
         match self
             .table
-            .find_entry(hash, |k| k.data(&self.nodes).key == *key)
+            .find_entry(hash, |k| k.data(&self.nodes).key.equivalent(key))
         {
             Ok(occupied) => {
                 let ptr = occupied.remove().0;
@@ -1924,10 +1938,13 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// assert_eq!(map.get_ptr(&"missing"), None);
     /// ```
     #[inline]
-    pub fn get_ptr(&self, key: &K) -> Option<Ptr> {
+    pub fn get_ptr<Q>(&self, key: &Q) -> Option<Ptr>
+    where
+        Q: Equivalent<K> + Hash + Borrow<K>,
+    {
         let hash = self.hasher.hash_one(key);
         self.table
-            .find(hash, |k| &k.data(&self.nodes).key == key)
+            .find(hash, |k| k.data(&self.nodes).key.equivalent(key))
             .map(|ptr| ptr.this(&self.nodes))
     }
 
@@ -1947,10 +1964,13 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// assert_eq!(map.get(&2), None);
     /// ```
     #[inline]
-    pub fn get(&self, key: &K) -> Option<&T> {
+    pub fn get<Q>(&self, key: &Q) -> Option<&T>
+    where
+        Q: Equivalent<K> + Hash + Borrow<K>,
+    {
         self.table
             .find(self.hasher.hash_one(key), |k| {
-                &k.data(&self.nodes).key == key
+                k.data(&self.nodes).key.equivalent(key)
             })
             .map(|ptr| &ptr.data(&self.nodes).value)
     }
@@ -1973,10 +1993,13 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// assert_eq!(map.get(&1), Some(&"b"));
     /// ```
     #[inline]
-    pub fn get_mut(&mut self, key: &K) -> Option<&mut T> {
+    pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut T>
+    where
+        Q: Equivalent<K> + Hash + Borrow<K>,
+    {
         self.table
             .find_mut(self.hasher.hash_one(key), |k| {
-                &k.data(&self.nodes).key == key
+                k.data(&self.nodes).key.equivalent(key)
             })
             .map(|ptr| &mut ptr.data_mut(&mut self.nodes).value)
     }
@@ -1997,7 +2020,10 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// assert_eq!(map.contains_key(&2), false);
     /// ```
     #[inline]
-    pub fn contains_key(&self, key: &K) -> bool {
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        Q: Equivalent<K> + Hash + Borrow<K>,
+    {
         self.get_ptr(key).is_some()
     }
 }
