@@ -528,3 +528,383 @@ impl<K, T> IndexMut<Ptr> for Arena<K, T> {
             .data_mut(self)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use alloc::format;
+    use alloc::string::String;
+
+    use super::*;
+
+    #[test]
+    fn test_arena_creation() {
+        let arena: ArenaContainer<i32, String> = Arena::with_capacity(10);
+
+        assert_eq!(arena.slots.len(), 0);
+    }
+
+    #[test]
+    fn test_alloc_circular_single_element() {
+        let mut arena = Arena::with_capacity(5);
+        let slot = arena.alloc_circular(1, "first".to_string());
+
+        assert_eq!(slot.data(&arena).key, 1);
+        assert_eq!(slot.data(&arena).value, "first");
+        assert_eq!(slot.next(&arena), slot);
+        assert_eq!(slot.prev(&arena), slot);
+        assert_eq!(arena.slots.len(), 1);
+    }
+
+    #[test]
+    fn test_alloc_circular_multiple_elements() {
+        let mut arena = Arena::with_capacity(5);
+        let first = arena.alloc_circular(1, "first".to_string());
+        let second = arena.alloc_circular(2, "second".to_string());
+
+        assert_eq!(first.data(&arena).key, 1);
+        assert_eq!(second.data(&arena).key, 2);
+        assert_eq!(arena.slots.len(), 2);
+
+        assert_eq!(first.next(&arena), first);
+        assert_eq!(first.prev(&arena), first);
+        assert_eq!(second.next(&arena), second);
+        assert_eq!(second.prev(&arena), second);
+    }
+
+    #[test]
+    fn test_alloc_with_links() {
+        let mut arena = Arena::with_capacity(5);
+        let first = arena.alloc_circular(1, "first".to_string());
+        let second = arena.alloc(2, "second".to_string(), first, first);
+
+        assert_eq!(second.data(&arena).key, 2);
+        assert_eq!(second.prev(&arena), first);
+        assert_eq!(second.next(&arena), first);
+        assert_eq!(arena.slots.len(), 2);
+    }
+
+    #[test]
+    fn test_active_slot_ref_data_access() {
+        let mut arena = Arena::with_capacity(5);
+        let mut slot = arena.alloc_circular(42, "test".to_string());
+
+        let data = slot.data(&arena);
+        assert_eq!(data.key, 42);
+        assert_eq!(data.value, "test");
+
+        let data_mut = slot.data_mut(&mut arena);
+        data_mut.value = "modified".to_string();
+
+        assert_eq!(slot.data(&arena).value, "modified");
+    }
+
+    #[test]
+    fn test_active_slot_ref_navigation() {
+        let mut arena = Arena::with_capacity(5);
+        let mut first = arena.alloc_circular(1, "first".to_string());
+        let mut second = arena.alloc(2, "second".to_string(), first, first);
+        let third = arena.alloc(3, "third".to_string(), second, first);
+
+        *second.next_mut(&mut arena) = third;
+        *first.prev_mut(&mut arena) = third;
+
+        assert_eq!(second.next(&arena), third);
+        assert_eq!(third.prev(&arena), second);
+    }
+
+    #[test]
+    fn test_active_slot_ref_this() {
+        let mut arena = Arena::with_capacity(5);
+        let slot = arena.alloc_circular(1, "test".to_string());
+
+        let ptr = slot.this(&arena);
+        assert_eq!(ptr.unchecked_get(), 0);
+    }
+
+    #[test]
+    fn test_active_slot_ref_as_ptr() {
+        let mut arena = Arena::with_capacity(5);
+        let slot = arena.alloc_circular(1, "test".to_string());
+
+        let raw_ptr = slot.as_ptr();
+
+        assert_eq!(raw_ptr, slot.slot);
+    }
+
+    #[test]
+    fn test_active_slot_ref_equality() {
+        let mut arena = Arena::with_capacity(5);
+        let slot1 = arena.alloc_circular(1, "test".to_string());
+        let slot2 = slot1;
+        let slot3 = arena.alloc_circular(2, "other".to_string());
+
+        assert_eq!(slot1, slot2);
+        assert_ne!(slot1, slot3);
+    }
+
+    #[test]
+    fn test_active_slot_ref_debug() {
+        let mut arena = Arena::with_capacity(5);
+        let slot = arena.alloc_circular(1, "test".to_string());
+
+        let debug_str = format!("{:?}", slot);
+        assert!(debug_str.starts_with("ActiveSlotRef("));
+    }
+
+    #[test]
+    fn test_map_ptr_valid() {
+        let mut arena = Arena::with_capacity(5);
+        let slot = arena.alloc_circular(42, "test".to_string());
+        let ptr = slot.this(&arena);
+
+        let mapped = arena.map_ptr(ptr);
+        assert!(mapped.is_some());
+        assert_eq!(mapped.unwrap().data(&arena).key, 42);
+    }
+
+    #[test]
+    fn test_map_ptr_invalid_index() {
+        let arena = Arena::<i32, String>::with_capacity(5);
+
+        #[cfg(not(feature = "generational"))]
+        let invalid_ptr = Ptr::unchecked_from(999);
+        #[cfg(feature = "generational")]
+        let invalid_ptr = Ptr::unchecked_from(999, 0);
+
+        let mapped = arena.map_ptr(invalid_ptr);
+        assert!(mapped.is_none());
+    }
+
+    #[test]
+    fn test_is_occupied_valid() {
+        let mut arena = Arena::with_capacity(5);
+        let slot = arena.alloc_circular(42, "test".to_string());
+        let ptr = slot.this(&arena);
+
+        assert!(arena.is_occupied(ptr));
+    }
+
+    #[test]
+    fn test_is_occupied_invalid() {
+        let arena = Arena::<i32, String>::with_capacity(5);
+
+        #[cfg(not(feature = "generational"))]
+        let invalid_ptr = Ptr::unchecked_from(999);
+        #[cfg(feature = "generational")]
+        let invalid_ptr = Ptr::unchecked_from(999, 0);
+
+        assert!(!arena.is_occupied(invalid_ptr));
+    }
+
+    #[test]
+    fn test_free_and_unlink_single_element() {
+        let mut arena = Arena::with_capacity(5);
+        let slot = arena.alloc_circular(42, "test".to_string());
+        let ptr = slot.this(&arena);
+
+        let freed = unsafe { arena.free_and_unlink(slot) };
+
+        assert_eq!(freed.data.key, 42);
+        assert_eq!(freed.data.value, "test");
+        assert_eq!(freed.this, ptr);
+        assert!(freed.prev_next.is_none());
+
+        assert!(!arena.is_occupied(ptr));
+        assert!(arena.free_list_head.is_some());
+    }
+
+    #[test]
+    fn test_free_and_unlink_with_neighbors() {
+        let mut arena = Arena::with_capacity(5);
+        let mut first = arena.alloc_circular(1, "first".to_string());
+        let mut second = arena.alloc(2, "second".to_string(), first, first);
+        let mut third = arena.alloc(3, "third".to_string(), second, first);
+
+        *first.next_mut(&mut arena) = second;
+        *first.prev_mut(&mut arena) = third;
+        *second.next_mut(&mut arena) = third;
+        *second.prev_mut(&mut arena) = first;
+        *third.next_mut(&mut arena) = first;
+        *third.prev_mut(&mut arena) = second;
+
+        let second_ptr = second.this(&arena);
+        let freed = unsafe { arena.free_and_unlink(second) };
+
+        assert_eq!(freed.data.key, 2);
+        assert!(freed.prev_next.is_some());
+        let (prev, next) = freed.prev_next.unwrap();
+        assert_eq!(prev, first);
+        assert_eq!(next, third);
+
+        assert_eq!(first.next(&arena), third);
+        assert_eq!(third.prev(&arena), first);
+
+        assert!(!arena.is_occupied(second_ptr));
+    }
+
+    #[test]
+    fn test_free_list_reuse() {
+        let mut arena = Arena::with_capacity(5);
+        let first = arena.alloc_circular(1, "first".to_string());
+        let first_ptr = first.this(&arena);
+
+        unsafe { arena.free_and_unlink(first) };
+
+        let second = arena.alloc_circular(2, "second".to_string());
+        let second_ptr = second.this(&arena);
+
+        assert_eq!(first_ptr.unchecked_get(), second_ptr.unchecked_get());
+        assert_eq!(arena.slots.len(), 1);
+    }
+
+    #[test]
+    fn test_multiple_free_list_operations() {
+        let mut arena = Arena::with_capacity(10);
+
+        let slots: Vec<_> = (0..5)
+            .map(|i| arena.alloc_circular(i, format!("value{}", i)))
+            .collect();
+
+        assert_eq!(arena.slots.len(), 5);
+
+        unsafe {
+            arena.free_and_unlink(slots[1]);
+            arena.free_and_unlink(slots[3]);
+        }
+
+        let new1 = arena.alloc_circular(10, "new1".to_string());
+        let new2 = arena.alloc_circular(11, "new2".to_string());
+
+        assert_eq!(arena.slots.len(), 5);
+        assert_eq!(new1.data(&arena).key, 10);
+        assert_eq!(new2.data(&arena).key, 11);
+    }
+
+    #[test]
+    fn test_index_trait() {
+        let mut arena = Arena::with_capacity(5);
+        let slot = arena.alloc_circular(42, "test".to_string());
+        let ptr = slot.this(&arena);
+
+        assert_eq!(arena[ptr].key, 42);
+        assert_eq!(arena[ptr].value, "test");
+    }
+
+    #[test]
+    fn test_index_mut_trait() {
+        let mut arena = Arena::with_capacity(5);
+        let slot = arena.alloc_circular(42, "test".to_string());
+        let ptr = slot.this(&arena);
+
+        arena[ptr].value = "modified".to_string();
+        assert_eq!(arena[ptr].value, "modified");
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_index_invalid_ptr_panic() {
+        let arena = Arena::<i32, String>::with_capacity(5);
+
+        #[cfg(not(feature = "generational"))]
+        let invalid_ptr = Ptr::unchecked_from(999);
+        #[cfg(feature = "generational")]
+        let invalid_ptr = Ptr::unchecked_from(999, 0);
+
+        let _ = &arena[invalid_ptr];
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_index_mut_invalid_ptr_panic() {
+        let mut arena = Arena::<i32, String>::with_capacity(5);
+
+        #[cfg(not(feature = "generational"))]
+        let invalid_ptr = Ptr::unchecked_from(999);
+        #[cfg(feature = "generational")]
+        let invalid_ptr = Ptr::unchecked_from(999, 0);
+
+        let _ = &mut arena[invalid_ptr];
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_index_freed_ptr_panic() {
+        let mut arena = Arena::with_capacity(5);
+        let slot = arena.alloc_circular(42, "test".to_string());
+        let ptr = slot.this(&arena);
+
+        unsafe { arena.free_and_unlink(slot) };
+
+        let _ = &arena[ptr];
+    }
+
+    #[test]
+    fn test_freed_slot_struct() {
+        let mut arena = Arena::with_capacity(5);
+        let slot = arena.alloc_circular(42, "test".to_string());
+        let ptr = slot.this(&arena);
+
+        let freed = unsafe { arena.free_and_unlink(slot) };
+
+        assert_eq!(freed.data.key, 42);
+        assert_eq!(freed.data.value, "test");
+        assert_eq!(freed.this, ptr);
+        assert!(freed.prev_next.is_none());
+    }
+
+    #[test]
+    fn test_drop_behavior() {
+        let mut arena = Arena::with_capacity(5);
+
+        let _slot1 = arena.alloc_circular(1, "first".to_string());
+        let _slot2 = arena.alloc_circular(2, "second".to_string());
+        let slot3 = arena.alloc_circular(3, "third".to_string());
+
+        unsafe { arena.free_and_unlink(slot3) };
+
+        drop(arena);
+    }
+
+    #[test]
+    fn test_capacity_management() {
+        let arena = Arena::<i32, String>::with_capacity(100);
+
+        assert!(arena.slots.capacity() >= 100);
+
+        #[cfg(feature = "generational")]
+        assert!(arena.generations.capacity() >= 100);
+    }
+
+    #[cfg(feature = "generational")]
+    #[test]
+    fn test_generational_tracking() {
+        let mut arena = Arena::with_capacity(5);
+        let slot = arena.alloc_circular(42, "test".to_string());
+        let ptr = slot.this(&arena);
+
+        assert_eq!(ptr.generation, 0);
+
+        unsafe { arena.free_and_unlink(slot) };
+        let new_slot = arena.alloc_circular(43, "new".to_string());
+        let new_ptr = new_slot.this(&arena);
+
+        assert_eq!(new_ptr.generation, 1);
+        assert_eq!(new_ptr.unchecked_get(), ptr.unchecked_get());
+
+        assert!(!arena.is_occupied(ptr));
+        assert!(arena.is_occupied(new_ptr));
+    }
+
+    #[cfg(feature = "generational")]
+    #[test]
+    fn test_generational_map_ptr_stale() {
+        let mut arena = Arena::with_capacity(5);
+        let slot = arena.alloc_circular(42, "test".to_string());
+        let old_ptr = slot.this(&arena);
+
+        unsafe { arena.free_and_unlink(slot) };
+        let _new_slot = arena.alloc_circular(43, "new".to_string());
+
+        assert!(arena.map_ptr(old_ptr).is_none());
+    }
+}
