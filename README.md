@@ -14,21 +14,8 @@ An order-preserving hash map built on an intrusive doubly‑linked list with O(1
 - Maximum capacity of 2^32 - 1 entries.
 - Safe public API; `unsafe` only in well-audited internals
 
-## Install
 
-Add to your Cargo.toml
-
-```toml
-[dependencies]
-tether-map = "0.1"
-```
-
-no_std users:
-
-```toml
-[dependencies]
-tether-map = { version = "0.1", default-features = false }
-```
+## Features
 
 The crate uses `alloc` internally and does not require `std` unless the `std` feature is enabled
 (enabled by default).
