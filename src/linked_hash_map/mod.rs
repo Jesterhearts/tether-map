@@ -300,6 +300,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// let entries: Vec<_> = map.iter().collect();
     /// assert_eq!(entries, [(&"a", &1), (&"c", &3), (&"b", &2)]);
     /// ```
+    #[inline]
     pub fn move_after(&mut self, moved: Ptr, after: Ptr) -> Option<()> {
         if moved == after {
             return None;
@@ -311,6 +312,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
         self.move_after_internal(moved, after)
     }
 
+    #[inline]
     fn move_after_internal(
         &mut self,
         mut moved: ActiveSlotRef<K, T>,
@@ -402,6 +404,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// let entries: Vec<_> = map.iter().collect();
     /// assert_eq!(entries, [(&"b", &2), (&"a", &1), (&"c", &3)]);
     /// ```
+    #[inline]
     pub fn move_before(&mut self, moved: Ptr, before: Ptr) -> Option<()> {
         if moved == before {
             return None;
@@ -413,6 +416,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
         self.move_before_internal(moved, before)
     }
 
+    #[inline]
     fn move_before_internal(
         &mut self,
         mut moved: ActiveSlotRef<K, T>,
@@ -487,6 +491,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     ///
     /// * `Some(())` if the linking was successful
     /// * `None` if the pointer is invalid
+    #[inline]
     pub fn link_as_head(&mut self, ptr: Ptr) -> Option<()> {
         let node = self.nodes.map_ptr(ptr)?;
         self.link_node_internal(
@@ -516,6 +521,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     ///
     /// * `Some(())` if the linking was successful
     /// * `None` if the pointer is invalid
+    #[inline]
     pub fn link_as_tail(&mut self, ptr: Ptr) -> Option<()> {
         let node = self.nodes.map_ptr(ptr)?;
         self.link_node_internal(
@@ -534,6 +540,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// linked entries may screw up the list, causing issues during iteration or
     /// other operations. It will not cause undefined behavior, but it may lead
     /// to logical errors.
+    #[inline]
     pub fn link_after(&mut self, ptr: Ptr, prev: Ptr) -> Option<()> {
         let node = self.nodes.map_ptr(ptr)?;
         let prev = self.nodes.map_ptr(prev);
@@ -548,6 +555,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// linked entries may screw up the list, causing issues during iteration or
     /// other operations. It will not cause undefined behavior, but it may lead
     /// to logical errors.
+    #[inline]
     pub fn link_before(&mut self, ptr: Ptr, next: Ptr) -> Option<()> {
         let node = self.nodes.map_ptr(ptr)?;
         let next = self.nodes.map_ptr(next);
@@ -558,6 +566,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     ///
     /// `node` must be occupied (i.e. part of this map's arena). If prev and
     /// next are non-null, they must also be occupied.
+    #[inline]
     fn link_node_internal(
         &mut self,
         mut node: ActiveSlotRef<K, T>,
@@ -1383,6 +1392,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// assert_eq!(map.insert(37, "c"), Some("b"));
     /// assert_eq!(map.get(&37), Some(&"c"));
     /// ```
+    #[inline]
     pub fn insert(&mut self, key: K, value: T) -> Option<T> {
         let entry = self.entry(key);
         match entry {
@@ -1439,6 +1449,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// // Use the pointer for direct access
     /// assert_eq!(map.ptr_get(ptr1), Some(&20));
     /// ```
+    #[inline]
     pub fn insert_full(&mut self, key: K, value: T) -> (Ptr, Option<T>) {
         let entry = self.entry(key);
         match entry {
@@ -1471,6 +1482,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// let keys: Vec<_> = map.keys().cloned().collect();
     /// assert_eq!(keys, ["first", "second"]);
     /// ```
+    #[inline]
     pub fn insert_tail(&mut self, key: K, value: T) -> Option<T> {
         let entry = self.entry(key);
         match entry {
@@ -1531,6 +1543,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// let entries: Vec<_> = map.iter().collect();
     /// assert_eq!(entries, [(&"b", &2), (&"c", &3), (&"a", &10)]);
     /// ```
+    #[inline]
     pub fn insert_tail_full(&mut self, key: K, value: T) -> (Ptr, Option<T>) {
         let entry = self.entry(key);
         match entry {
@@ -1564,6 +1577,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// let keys: Vec<_> = map.keys().cloned().collect();
     /// assert_eq!(keys, ["second", "first"]); // second is now first
     /// ```
+    #[inline]
     pub fn insert_head(&mut self, key: K, value: T) -> Option<T> {
         let entry = self.entry(key);
         match entry {
@@ -1625,6 +1639,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// let entries: Vec<_> = map.iter().collect();
     /// assert_eq!(entries, [(&"b", &20), (&"a", &1), (&"c", &3)]);
     /// ```
+    #[inline]
     pub fn insert_head_full(&mut self, key: K, value: T) -> (Ptr, Option<T>) {
         let entry = self.entry(key);
         match entry {
@@ -1821,6 +1836,7 @@ impl<K: Hash + Eq, T, S: BuildHasher> LinkedHashMap<K, T, S> {
     /// // Removing a non-existent key returns None
     /// assert_eq!(map.remove_full(&"b"), None);
     /// ```
+    #[inline]
     pub fn remove_full(&mut self, key: &K) -> Option<(Ptr, RemovedEntry<K, T>)> {
         if self.is_empty() {
             return None;

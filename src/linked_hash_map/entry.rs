@@ -314,6 +314,7 @@ impl<'a, K, T> OccupiedEntry<'a, K, T> {
     /// }
     /// assert_eq!(map.len(), 0);
     /// ```
+    #[inline]
     pub fn remove_entry(self) -> (K, T) {
         let entry = self.entry.remove().0;
         // SAFETY: We just removed `entry` from the hash table, and we don't deref it
@@ -633,6 +634,7 @@ impl<'a, K: Hash + Eq, T> VacantEntry<'a, K, T> {
     /// # Safety
     ///
     /// `before` must be either null or a valid pointer into self.nodes.
+    #[inline]
     pub(crate) fn insert_before_internal(
         self,
         value: T,
