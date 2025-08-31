@@ -12,7 +12,8 @@ use crate::arena::Links;
 /// This struct is created by the [`iter`] method on [`LinkedHashMap`]. See its
 /// documentation for more.
 ///
-/// [`iter`]: LinkedHashMap::iter
+/// [`iter`]: crate::LinkedHashMap::iter
+/// [`LinkedHashMap`]: crate::LinkedHashMap
 ///
 /// # Examples
 ///
@@ -77,6 +78,7 @@ impl<'a, K, T> DoubleEndedIterator for Iter<'a, K, T> {
 ///
 /// [`into_iter`]: IntoIterator::into_iter
 /// [`IntoIterator`]: core::iter::IntoIterator
+/// [`LinkedHashMap`]: crate::LinkedHashMap
 ///
 /// # Examples
 ///
@@ -139,7 +141,8 @@ impl<K, T> DoubleEndedIterator for IntoIter<K, T> {
 /// This struct is created by the [`iter_mut`] method on [`LinkedHashMap`]. See
 /// its documentation for more.
 ///
-/// [`iter_mut`]: LinkedHashMap::iter_mut
+/// [`iter_mut`]: crate::LinkedHashMap::iter_mut
+/// [`LinkedHashMap`]: crate::LinkedHashMap
 ///
 /// # Examples
 ///
@@ -167,9 +170,10 @@ pub struct IterMut<'a, K, T> {
 /// A mutable iterator over the values of a `LinkedHashMap`.
 ///
 /// This iterator yields `&mut T` values in the order they were inserted into
-/// the map. It is created by the [`values_mut`] method on `LinkedHashMap`.
+/// the map. It is created by the [`values_mut`] method on [`LinkedHashMap`].
 ///
-/// [`values_mut`]: LinkedHashMap::values_mut
+/// [`values_mut`]: crate::LinkedHashMap::values_mut
+/// [`LinkedHashMap`]: crate::LinkedHashMap
 ///
 /// # Examples
 ///

@@ -12,7 +12,8 @@ use crate::linked_hash_map::HeadTail;
 ///
 /// This enum is constructed from the [`entry`] method on [`LinkedHashMap`].
 ///
-/// [`entry`]: LinkedHashMap::entry
+/// [`entry`]: crate::LinkedHashMap::entry
+/// [`LinkedHashMap`]: crate::LinkedHashMap
 ///
 /// # Examples
 ///

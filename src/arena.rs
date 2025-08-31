@@ -237,6 +237,8 @@ pub(crate) struct FreedSlot<K, T> {
 pub(crate) struct Arena<K, T> {
     bump: Bump,
     slots: Vec<NonNull<LLSlot<K, T>>>,
+    #[cfg(feature = "generational")]
+    generations: Vec<u32>,
     free_list_head: Option<NonNull<LLSlot<K, T>>>,
 }
 
@@ -267,6 +269,8 @@ impl<K, T> Arena<K, T> {
                 bump: Bump::with_capacity(capacity * core::mem::size_of::<LLSlot<K, T>>()),
                 slots: Vec::with_capacity(capacity),
                 free_list_head: None,
+                #[cfg(feature = "generational")]
+                generations: Vec::with_capacity(capacity),
             })
         }
         #[cfg(not(debug_assertions))]
@@ -274,6 +278,8 @@ impl<K, T> Arena<K, T> {
             bump: Bump::with_capacity(capacity * core::mem::size_of::<LLSlot<K, T>>()),
             slots: Vec::with_capacity(capacity),
             free_list_head: None,
+            #[cfg(feature = "generational")]
+            generations: Vec::with_capacity(capacity),
         }
     }
 
@@ -284,6 +290,17 @@ impl<K, T> Arena<K, T> {
             .filter(|slot| {
                 // SAFETY: Slot was allocated from our own arena, so it's still valid.
                 unsafe { matches!(slot.as_ref().links, Links::Occupied { .. }) }
+            })
+            .filter(|_slot| {
+                // SAFETY: Slot was allocated from our own arena, so it's still valid, we've
+                // checked that it's occupied.
+                #[cfg(feature = "generational")]
+                unsafe {
+                    let index = _slot.as_ref().this.unchecked_get();
+                    self.generations.get(index) == Some(&ptr.generation)
+                }
+                #[cfg(not(feature = "generational"))]
+                true
             })
             .map(|&slot| ActiveSlotRef {
                 slot,
@@ -296,7 +313,19 @@ impl<K, T> Arena<K, T> {
     pub(crate) fn is_occupied(&self, ptr: Ptr) -> bool {
         self.slots.get(ptr.unchecked_get()).is_some_and(|slot| {
             // SAFETY: Slot was allocated from our own arena, so it's still valid.
-            unsafe { matches!(slot.as_ref().links, Links::Occupied { .. }) }
+            if unsafe { !matches!(slot.as_ref().links, Links::Occupied { .. }) } {
+                return false;
+            }
+
+            // SAFETY: Slot was allocated from our own arena, so it's still valid, we've
+            // checked that it's occupied.
+            #[cfg(feature = "generational")]
+            unsafe {
+                let index = slot.as_ref().this.unchecked_get();
+                self.generations.get(index) == Some(&ptr.generation)
+            }
+            #[cfg(not(feature = "generational"))]
+            true
         })
     }
 
@@ -327,11 +356,21 @@ impl<K, T> Arena<K, T> {
                 };
 
                 free_slot.as_mut().data = MaybeUninit::new(NodeData { key, value });
+                #[cfg(feature = "generational")]
+                {
+                    let index = free_slot.as_ref().this.unchecked_get();
+                    self.generations[index] = self.generations[index].wrapping_add(1);
+                    free_slot.as_mut().this = Ptr::unchecked_from(index, self.generations[index]);
+                }
 
                 active_slot
             }
         } else {
+            #[cfg(feature = "generational")]
+            let ptr = Ptr::unchecked_from(self.slots.len(), 0);
+            #[cfg(not(feature = "generational"))]
             let ptr = Ptr::unchecked_from(self.slots.len());
+
             let slot = self.bump.alloc(LLSlot {
                 this: ptr,
                 links: Links::Vacant { next_free: None },
@@ -352,6 +391,10 @@ impl<K, T> Arena<K, T> {
             }
 
             self.slots.push(slot_ptr);
+
+            #[cfg(feature = "generational")]
+            self.generations.push(0);
+
             active_slot
         }
     }
@@ -386,10 +429,21 @@ impl<K, T> Arena<K, T> {
                 free_slot.as_mut().links = Links::Occupied { prev, next };
                 free_slot.as_mut().data = MaybeUninit::new(NodeData { key, value });
 
+                #[cfg(feature = "generational")]
+                {
+                    let index = free_slot.as_ref().this.unchecked_get();
+                    self.generations[index] = self.generations[index].wrapping_add(1);
+                    free_slot.as_mut().this = Ptr::unchecked_from(index, self.generations[index]);
+                }
+
                 active_slot
             }
         } else {
+            #[cfg(feature = "generational")]
+            let ptr = Ptr::unchecked_from(self.slots.len(), 0);
+            #[cfg(not(feature = "generational"))]
             let ptr = Ptr::unchecked_from(self.slots.len());
+
             let slot = self.bump.alloc(LLSlot {
                 this: ptr,
                 links: Links::Occupied { prev, next },
@@ -403,14 +457,16 @@ impl<K, T> Arena<K, T> {
             };
 
             self.slots.push(slot_ptr);
+            #[cfg(feature = "generational")]
+            self.generations.push(0);
             active_slot
         }
     }
 
-    // # SAFETY
-    //
-    // The caller **must not** deref any copies of the passed in slot after calling
-    // this function.
+    /// # SAFETY
+    ///
+    /// The caller **must not** deref any copies of the passed in slot after
+    /// calling this function.
     #[inline]
     pub(crate) unsafe fn free_and_unlink(
         &mut self,

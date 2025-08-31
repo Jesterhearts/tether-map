@@ -23,6 +23,10 @@ The crate uses `alloc` internally and does not require `std` unless the `std` fe
 Feature flags:
 
 - `std` (default): Enables std-dependent conveniences like the default hasher and common traits.
+- `generational`: Makes `Ptr` handles safer by adding generation tracking to detect
+  use-after-remove. Even if this is disabled, using stale pointers will at worst result in
+  unexpected results, but will not cause undefined behavior. Enabling this adds 4 bytes to the size of
+  `Ptr` (8 bytes per entry total), and a small runtime cost to pointer operations.
 
 ## Quick start
 
@@ -86,7 +90,8 @@ assert_eq!(lru.iter().map(|(k, _)| *k).collect::<Vec<_>>(), ["c", "a", "d"]);
 
 ## no_std
 
-The crate compiles with `#![no_std]` when the `std` feature is disabled and requires the `alloc` crate at runtime. The default configuration enables `std`.
+The crate compiles with `#![no_std]` when the `std` feature is disabled and requires the `alloc`
+crate at runtime. The default configuration enables `std`.
 
 ## Performance and complexity
 
@@ -99,11 +104,13 @@ Benchmarks: Criterion benchmarks live in `benches/` (with comparisons against `i
 
 ## Safety notes and pointer semantics
 
-- `Ptr` is a compact, non‑generational handle to an entry. It remains valid until that entry is
-  removed from the map. After removal, the pointer should not be used as the same `Ptr` value may be
-  reused for a different entry later.
-- Cursors and pointer APIs assume pointers originate from this map. Using stale/foreign pointers is
-  a logic error and may return unexpected results or panic but will not result in undefined behavior.
+- `Ptr` is a compact handle to an entry. By default it is **non-generational** where it remains
+  valid until that entry is removed from the map. After removal, the pointer should not be used as
+  the same `Ptr` value may be reused for a different entry later.
+- With the `generational` feature enabled, `Ptr` includes generation tracking that detects
+  use-after-remove bugs by returning None or panicking when a stale pointer is used.
+- Cursors and pointer APIs assume pointers originate from this map. Using foreign pointers is a
+  logic error and may return unexpected results or panic but will not result in undefined behavior.
 
 ## Usage of Unsafe
 

@@ -18,8 +18,9 @@ readme = "README.md"
 path = "src/lib.rs"
 
 [features]
-default = [ "std" ]
-std     = [  ]
+default      = [ "std" ]
+generational = [  ]
+std          = [  ]
 
 [profile.release-with-debug]
 inherits = "release"

@@ -42,17 +42,21 @@ pub use linked_hash_map::OccupiedEntry;
 pub use linked_hash_map::VacantEntry;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(transparent)]
 /// A pointer type used to identify entries in the linked hash map.
 ///
 /// This is an opaque handle that can be used to directly access entries
-/// without key lookup. It provides O(1) access to entries. It is
-/// **non-generational**, meaning that once an entry is removed, the pointer may
-/// be re-used for a new entry.
+/// without key lookup. It provides O(1) access to entries.
+///
+/// By default, `Ptr` is **non-generational**, meaning that once an entry is
+/// removed, the pointer may be re-used for a new entry. With the `generational`
+/// feature enabled, `Ptr` includes generation tracking that will panic or
+/// return None when attempting to use a stale pointer after its entry has been
+/// removed.
 ///
 /// # Examples
 ///
 /// ```
+/// # #[cfg(not(feature = "generational"))] {
 /// use tether_map::Entry;
 /// use tether_map::LinkedHashMap;
 /// use tether_map::Ptr;
@@ -65,25 +69,85 @@ pub use linked_hash_map::VacantEntry;
 ///
 /// // Use the pointer for direct access
 /// assert_eq!(map.ptr_get(ptr), Some(&42));
+///
+/// // Remove the entry
+/// map.remove(&"key");
+///
+/// // Using the stale pointer is a logic error but will not panic
+/// assert_eq!(map.ptr_get(ptr), None);
+///
+/// // Insert a new entry, which may reuse the same Ptr value
+/// map.insert("key", 100);
+///
+/// // The old pointer is stale, but may point to the new entry by coincidence
+/// // This may work or not depending on whether the same Ptr value was reused:
+/// // assert_eq!(map.ptr_get(ptr), Some(100));
+///
+/// # }
 /// ```
-pub struct Ptr(NonZeroU32);
+///
+/// With the `generational` feature enabled, using a stale pointer will return
+/// None or panic:
+///
+/// ```
+/// # #[cfg(feature = "generational")] {
+/// use tether_map::Entry;
+/// use tether_map::LinkedHashMap;
+/// use tether_map::Ptr;
+///
+/// let mut map = LinkedHashMap::new();
+/// let ptr = match map.entry("key") {
+///     Entry::Vacant(entry) => entry.insert_tail(42).0,
+///     Entry::Occupied(entry) => entry.ptr(),
+/// };
+///
+/// // Remove the entry
+/// map.remove(&"key");
+///
+/// // Using the stale pointer will return None or panic
+/// assert_eq!(map.ptr_get(ptr), None);
+///
+/// // Insert a new entry, which may reuse the same Ptr value
+/// map.insert("key", 100);
+/// // The old pointer is stale, so this will definitely return None
+/// assert_eq!(map.ptr_get(ptr), None);
+///
+/// # }
+/// ```
+pub struct Ptr {
+    inner: NonZeroU32,
+    #[cfg(feature = "generational")]
+    generation: u32,
+}
 
 impl core::fmt::Debug for Ptr {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Ptr({})", self.0.get() - 1)
+        #[cfg(not(feature = "generational"))]
+        {
+            write!(f, "Ptr({})", self.inner.get() - 1)
+        }
+        #[cfg(feature = "generational")]
+        write!(f, "Ptr({}@{})", self.inner.get() - 1, self.generation)
     }
 }
 
 impl Ptr {
-    pub(crate) fn unchecked_from(index: usize) -> Self {
+    pub(crate) fn unchecked_from(
+        index: usize,
+        #[cfg(feature = "generational")] generation: u32,
+    ) -> Self {
         debug_assert!(
             index < u32::MAX as usize,
             "Index too large to fit in Ptr: {index}"
         );
-        Ptr(NonZeroU32::new((index as u32).saturating_add(1)).unwrap())
+        Ptr {
+            inner: NonZeroU32::new((index as u32).saturating_add(1)).unwrap(),
+            #[cfg(feature = "generational")]
+            generation,
+        }
     }
 
     pub(crate) fn unchecked_get(self) -> usize {
-        self.0.get() as usize - 1
+        self.inner.get() as usize - 1
     }
 }
