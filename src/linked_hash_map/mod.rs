@@ -872,7 +872,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     #[inline]
     pub fn ptr_get_entry_mut(&mut self, ptr: Ptr) -> Option<(&K, &mut T)> {
         self.nodes.map_ptr(ptr).map(|mut p| {
-            let data: &mut crate::arena::NodeData<K, T> = p.data_mut(&mut self.nodes);
+            let data = p.data_mut(&mut self.nodes);
             (&data.key, &mut data.value)
         })
     }
