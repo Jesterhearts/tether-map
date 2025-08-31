@@ -533,6 +533,7 @@ impl<K, T> IndexMut<Ptr> for Arena<K, T> {
 mod tests {
     use alloc::format;
     use alloc::string::String;
+    use alloc::string::ToString;
 
     use super::*;
 
