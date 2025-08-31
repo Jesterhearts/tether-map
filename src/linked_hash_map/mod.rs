@@ -726,7 +726,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// # Returns
     ///
     /// * `Some(next_ptr)` if there is a next entry
-    /// * `None` if this is the last entry or if the pointer is invalid
+    /// * `None` if the pointer is invalid
     ///
     /// # Examples
     ///
@@ -756,7 +756,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     /// # Returns
     ///
     /// * `Some(prev_ptr)` if there is a previous entry
-    /// * `None` if this is the first entry or if the pointer is invalid
+    /// * `None` if the pointer is invalid
     ///
     /// # Examples
     ///
@@ -872,7 +872,7 @@ impl<K, T, S> LinkedHashMap<K, T, S> {
     #[inline]
     pub fn ptr_get_entry_mut(&mut self, ptr: Ptr) -> Option<(&K, &mut T)> {
         self.nodes.map_ptr(ptr).map(|mut p| {
-            let data = p.data_mut(&mut self.nodes);
+            let data: &mut crate::arena::NodeData<K, T> = p.data_mut(&mut self.nodes);
             (&data.key, &mut data.value)
         })
     }

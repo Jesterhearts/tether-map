@@ -234,8 +234,7 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     /// # Returns
     ///
     /// * `Some(next_ptr)` if there is a next entry
-    /// * `None` if the cursor is at the last entry or positioned at a null
-    ///   entry
+    /// * `None` if the cursor is positioned at a null entry
     ///
     /// # Examples
     ///
@@ -266,8 +265,7 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     /// # Returns
     ///
     /// * `Some((&K, &T))` if there is a next entry
-    /// * `None` if the cursor is at the last entry or positioned at a null
-    ///   entry
+    /// * `None` if the cursor is positioned at a null entry
     ///
     /// # Examples
     ///
@@ -300,8 +298,7 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     /// # Returns
     ///
     /// * `Some((&K, &mut T))` if there is a next entry
-    /// * `None` if the cursor is at the last entry or positioned at a null
-    ///   entry
+    /// * `None` if the cursor is positioned at a null entry
     ///
     /// # Examples
     ///
@@ -331,8 +328,7 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     /// # Returns
     ///
     /// * `Some(prev_ptr)` if there is a previous entry
-    /// * `None` if the cursor is at the first entry or positioned at a null
-    ///   entry
+    /// * `None` if the cursor positioned at a null entry
     ///
     /// # Examples
     ///
@@ -363,8 +359,7 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     /// # Returns
     ///
     /// * `Some((&K, &T))` if there is a previous entry
-    /// * `None` if the cursor is at the first entry or positioned at a null
-    ///   entry
+    /// * `None` if the cursor is positioned at a null entry
     ///
     /// # Examples
     ///
@@ -397,8 +392,7 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     /// # Returns
     ///
     /// * `Some((&K, &mut T))` if there is a previous entry
-    /// * `None` if the cursor is at the first entry or positioned at a null
-    ///   entry
+    /// * `None` if the cursor is positioned at a null entry
     ///
     /// # Examples
     ///
