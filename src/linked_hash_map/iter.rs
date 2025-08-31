@@ -273,3 +273,412 @@ impl<'a, K, T> DoubleEndedIterator for ValuesMut<'a, K, T> {
         self.iter.next_back().map(|(_, v)| v)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use crate::LinkedHashMap;
+
+    #[test]
+    fn test_iter_empty() {
+        let map: LinkedHashMap<i32, &str> = LinkedHashMap::new();
+        let mut iter = map.iter();
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next_back(), None);
+    }
+
+    #[test]
+    fn test_iter_single_element() {
+        let mut map = LinkedHashMap::new();
+        map.insert(1, "one");
+
+        let mut iter = map.iter();
+        assert_eq!(iter.next(), Some((&1, &"one")));
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next_back(), None);
+    }
+
+    #[test]
+    fn test_iter_multiple_elements_forward() {
+        let mut map = LinkedHashMap::new();
+        map.insert(1, "one");
+        map.insert(2, "two");
+        map.insert(3, "three");
+
+        let mut iter = map.iter();
+        assert_eq!(iter.next(), Some((&1, &"one")));
+        assert_eq!(iter.next(), Some((&2, &"two")));
+        assert_eq!(iter.next(), Some((&3, &"three")));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_iter_multiple_elements_backward() {
+        let mut map = LinkedHashMap::new();
+        map.insert(1, "one");
+        map.insert(2, "two");
+        map.insert(3, "three");
+
+        let mut iter = map.iter();
+        assert_eq!(iter.next_back(), Some((&3, &"three")));
+        assert_eq!(iter.next_back(), Some((&2, &"two")));
+        assert_eq!(iter.next_back(), Some((&1, &"one")));
+        assert_eq!(iter.next_back(), None);
+    }
+
+    #[test]
+    fn test_iter_bidirectional() {
+        let mut map = LinkedHashMap::new();
+        map.insert(1, "one");
+        map.insert(2, "two");
+        map.insert(3, "three");
+        map.insert(4, "four");
+
+        let mut iter = map.iter();
+        assert_eq!(iter.next(), Some((&1, &"one")));
+        assert_eq!(iter.next_back(), Some((&4, &"four")));
+        assert_eq!(iter.next(), Some((&2, &"two")));
+        assert_eq!(iter.next_back(), Some((&3, &"three")));
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next_back(), None);
+    }
+
+    #[test]
+    fn test_iter_meet_in_middle() {
+        let mut map = LinkedHashMap::new();
+        map.insert(1, "one");
+        map.insert(2, "two");
+        map.insert(3, "three");
+
+        let mut iter = map.iter();
+        assert_eq!(iter.next(), Some((&1, &"one")));
+        assert_eq!(iter.next_back(), Some((&3, &"three")));
+        assert_eq!(iter.next(), Some((&2, &"two")));
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next_back(), None);
+    }
+
+    #[test]
+    fn test_iter_collect() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+        map.insert("c", 3);
+
+        let collected: Vec<_> = map.iter().collect();
+        assert_eq!(collected, vec![(&"a", &1), (&"b", &2), (&"c", &3)]);
+
+        let collected_rev: Vec<_> = map.iter().rev().collect();
+        assert_eq!(collected_rev, vec![(&"c", &3), (&"b", &2), (&"a", &1)]);
+    }
+
+    #[test]
+    fn test_into_iter_empty() {
+        let map: LinkedHashMap<i32, &str> = LinkedHashMap::new();
+        let mut iter = map.into_iter();
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next_back(), None);
+    }
+
+    #[test]
+    fn test_into_iter_single_element() {
+        let mut map = LinkedHashMap::new();
+        map.insert(1, "one");
+
+        let mut iter = map.into_iter();
+        assert_eq!(iter.next(), Some((1, "one")));
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next_back(), None);
+    }
+
+    #[test]
+    fn test_into_iter_multiple_elements_forward() {
+        let mut map = LinkedHashMap::new();
+        map.insert(1, "one");
+        map.insert(2, "two");
+        map.insert(3, "three");
+
+        let mut iter = map.into_iter();
+        assert_eq!(iter.next(), Some((1, "one")));
+        assert_eq!(iter.next(), Some((2, "two")));
+        assert_eq!(iter.next(), Some((3, "three")));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_into_iter_multiple_elements_backward() {
+        let mut map = LinkedHashMap::new();
+        map.insert(1, "one");
+        map.insert(2, "two");
+        map.insert(3, "three");
+
+        let mut iter = map.into_iter();
+        assert_eq!(iter.next_back(), Some((3, "three")));
+        assert_eq!(iter.next_back(), Some((2, "two")));
+        assert_eq!(iter.next_back(), Some((1, "one")));
+        assert_eq!(iter.next_back(), None);
+    }
+
+    #[test]
+    fn test_into_iter_bidirectional() {
+        let mut map = LinkedHashMap::new();
+        map.insert(1, "one");
+        map.insert(2, "two");
+        map.insert(3, "three");
+        map.insert(4, "four");
+
+        let mut iter = map.into_iter();
+        assert_eq!(iter.next(), Some((1, "one")));
+        assert_eq!(iter.next_back(), Some((4, "four")));
+        assert_eq!(iter.next(), Some((2, "two")));
+        assert_eq!(iter.next_back(), Some((3, "three")));
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next_back(), None);
+    }
+
+    #[test]
+    fn test_into_iter_collect() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+        map.insert("c", 3);
+
+        let collected: Vec<_> = map.into_iter().collect();
+        assert_eq!(collected, vec![("a", 1), ("b", 2), ("c", 3)]);
+    }
+
+    #[test]
+    fn test_iter_mut_empty() {
+        let mut map: LinkedHashMap<i32, &str> = LinkedHashMap::new();
+        let mut iter = map.iter_mut();
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next_back(), None);
+    }
+
+    #[test]
+    fn test_iter_mut_single_element() {
+        let mut map = LinkedHashMap::new();
+        map.insert(1, 100);
+
+        {
+            let mut iter = map.iter_mut();
+            if let Some((key, value)) = iter.next() {
+                assert_eq!(key, &1);
+                *value *= 2;
+            }
+            assert_eq!(iter.next(), None);
+        }
+
+        assert_eq!(map.get(&1), Some(&200));
+    }
+
+    #[test]
+    fn test_iter_mut_multiple_elements_forward() {
+        let mut map = LinkedHashMap::new();
+        map.insert(1, 10);
+        map.insert(2, 20);
+        map.insert(3, 30);
+
+        {
+            let iter = map.iter_mut();
+            for (_, value) in iter {
+                *value *= 2;
+            }
+        }
+
+        assert_eq!(map.get(&1), Some(&20));
+        assert_eq!(map.get(&2), Some(&40));
+        assert_eq!(map.get(&3), Some(&60));
+    }
+
+    #[test]
+    fn test_iter_mut_multiple_elements_backward() {
+        let mut map = LinkedHashMap::new();
+        map.insert(1, 10);
+        map.insert(2, 20);
+        map.insert(3, 30);
+
+        {
+            let mut iter = map.iter_mut();
+            while let Some((_, value)) = iter.next_back() {
+                *value += 1;
+            }
+        }
+
+        assert_eq!(map.get(&1), Some(&11));
+        assert_eq!(map.get(&2), Some(&21));
+        assert_eq!(map.get(&3), Some(&31));
+    }
+
+    #[test]
+    fn test_iter_mut_bidirectional() {
+        let mut map = LinkedHashMap::new();
+        map.insert(1, 10);
+        map.insert(2, 20);
+        map.insert(3, 30);
+        map.insert(4, 40);
+
+        {
+            let mut iter = map.iter_mut();
+            if let Some((_, value)) = iter.next() {
+                *value = 100;
+            }
+            if let Some((_, value)) = iter.next_back() {
+                *value = 400;
+            }
+            if let Some((_, value)) = iter.next() {
+                *value = 200;
+            }
+            if let Some((_, value)) = iter.next_back() {
+                *value = 300;
+            }
+        }
+
+        assert_eq!(map.get(&1), Some(&100));
+        assert_eq!(map.get(&2), Some(&200));
+        assert_eq!(map.get(&3), Some(&300));
+        assert_eq!(map.get(&4), Some(&400));
+    }
+
+    #[test]
+    fn test_values_mut_empty() {
+        let mut map: LinkedHashMap<i32, &str> = LinkedHashMap::new();
+        let mut iter = map.values_mut();
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next_back(), None);
+    }
+
+    #[test]
+    fn test_values_mut_single_element() {
+        let mut map = LinkedHashMap::new();
+        map.insert("key", 42);
+
+        {
+            let mut iter = map.values_mut();
+            if let Some(value) = iter.next() {
+                *value = 99;
+            }
+            assert_eq!(iter.next(), None);
+        }
+
+        assert_eq!(map.get(&"key"), Some(&99));
+    }
+
+    #[test]
+    fn test_values_mut_multiple_elements_forward() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+        map.insert("c", 3);
+
+        {
+            for value in map.values_mut() {
+                *value *= 10;
+            }
+        }
+
+        assert_eq!(map.get(&"a"), Some(&10));
+        assert_eq!(map.get(&"b"), Some(&20));
+        assert_eq!(map.get(&"c"), Some(&30));
+    }
+
+    #[test]
+    fn test_values_mut_multiple_elements_backward() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+        map.insert("c", 3);
+
+        {
+            let mut iter = map.values_mut();
+            while let Some(value) = iter.next_back() {
+                *value += 100;
+            }
+        }
+
+        assert_eq!(map.get(&"a"), Some(&101));
+        assert_eq!(map.get(&"b"), Some(&102));
+        assert_eq!(map.get(&"c"), Some(&103));
+    }
+
+    #[test]
+    fn test_values_mut_bidirectional() {
+        let mut map = LinkedHashMap::new();
+        map.insert(1, 10);
+        map.insert(2, 20);
+        map.insert(3, 30);
+        map.insert(4, 40);
+
+        {
+            let mut iter = map.values_mut();
+            if let Some(value) = iter.next() {
+                *value = 1000;
+            }
+            if let Some(value) = iter.next_back() {
+                *value = 4000;
+            }
+            if let Some(value) = iter.next() {
+                *value = 2000;
+            }
+            if let Some(value) = iter.next_back() {
+                *value = 3000;
+            }
+        }
+
+        assert_eq!(map.get(&1), Some(&1000));
+        assert_eq!(map.get(&2), Some(&2000));
+        assert_eq!(map.get(&3), Some(&3000));
+        assert_eq!(map.get(&4), Some(&4000));
+    }
+
+    #[test]
+    fn test_values_mut_collect() {
+        let mut map = LinkedHashMap::new();
+        map.insert("x", 1);
+        map.insert("y", 2);
+        map.insert("z", 3);
+
+        let original_values: Vec<_> = map.values_mut().map(|v| *v).collect();
+        assert_eq!(original_values, vec![1, 2, 3]);
+
+        for value in map.values_mut() {
+            *value *= 5;
+        }
+
+        let modified_values: Vec<_> = map.values_mut().map(|v| *v).collect();
+        assert_eq!(modified_values, vec![5, 10, 15]);
+    }
+
+    #[test]
+    fn test_iterator_size_hints() {
+        let mut map = LinkedHashMap::new();
+        map.insert(1, "a");
+        map.insert(2, "b");
+        map.insert(3, "c");
+
+        let iter = map.iter();
+        assert_eq!(iter.size_hint(), (0, None));
+
+        let values_iter = map.values_mut();
+        assert_eq!(values_iter.size_hint(), (0, None));
+    }
+
+    #[test]
+    fn test_iterator_preservation_after_modification() {
+        let mut map = LinkedHashMap::new();
+        map.insert(1, 10);
+        map.insert(2, 20);
+        map.insert(3, 30);
+
+        let collected_before: Vec<_> = map.iter().map(|(k, v)| (*k, *v)).collect();
+
+        map.insert(4, 40);
+
+        let collected_after: Vec<_> = map.iter().map(|(k, v)| (*k, *v)).collect();
+
+        assert_eq!(collected_before, vec![(1, 10), (2, 20), (3, 30)]);
+        assert_eq!(collected_after, vec![(1, 10), (2, 20), (3, 30), (4, 40)]);
+    }
+}

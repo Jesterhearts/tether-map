@@ -123,6 +123,12 @@ impl<'m, K: Hash + Eq, T, S: BuildHasher> CursorMut<'m, K, T, S> {
     #[inline]
     pub fn remove_prev(&mut self) -> Option<(Ptr, RemovedEntry<K, T>)> {
         let prev = self.ptr.map(|slot| slot.prev(&self.map.nodes))?;
+        if Some(prev) == self.ptr {
+            // Only one element in the list, so removing prev would make the
+            // cursor invalid. We choose to keep the cursor at the same position
+            // (which will be None after removal).
+            self.ptr = None;
+        }
         Some(self.map.remove_ptr_internal(prev))
     }
 
@@ -130,6 +136,9 @@ impl<'m, K: Hash + Eq, T, S: BuildHasher> CursorMut<'m, K, T, S> {
     #[inline]
     pub fn remove_next(&mut self) -> Option<(Ptr, RemovedEntry<K, T>)> {
         let next = self.ptr.map(|slot| slot.next(&self.map.nodes))?;
+        if Some(next) == self.ptr {
+            self.ptr = None;
+        }
         Some(self.map.remove_ptr_internal(next))
     }
 
@@ -414,5 +423,435 @@ impl<'m, K, T, S> CursorMut<'m, K, T, S> {
     pub fn prev_mut(&mut self) -> Option<(&K, &mut T)> {
         let ptr = self.prev_ptr()?;
         self.map.ptr_get_entry_mut(ptr)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use crate::LinkedHashMap;
+
+    #[test]
+    fn test_cursor_insert_after_move_to_empty_map() {
+        let mut map = LinkedHashMap::new();
+        {
+            let mut cursor = map.head_cursor_mut();
+            assert_eq!(cursor.insert_after_move_to("first", 1), None);
+            assert_eq!(cursor.current(), Some((&"first", &1)));
+            assert!(cursor.at_head());
+            assert!(cursor.at_tail());
+        }
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn test_cursor_insert_after_move_to_existing_key() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+
+        let mut cursor = map.head_cursor_mut();
+        let old_value = cursor.insert_after_move_to("aa", 10);
+
+        assert_eq!(old_value, None);
+        assert_eq!(cursor.current(), Some((&"aa", &10)));
+        assert_eq!(map.len(), 3);
+
+        let collected: Vec<_> = map.iter().map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(collected, vec![("a", 1), ("aa", 10), ("b", 2)]);
+    }
+
+    #[test]
+    fn test_cursor_insert_after_move_to_new_key() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+
+        let mut cursor = map.head_cursor_mut();
+        assert_eq!(cursor.insert_after_move_to("c", 3), None);
+
+        assert_eq!(cursor.current(), Some((&"c", &3)));
+        assert_eq!(map.len(), 3);
+
+        let collected: Vec<_> = map.iter().map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(collected, vec![("a", 1), ("c", 3), ("b", 2)]);
+    }
+
+    #[test]
+    fn test_cursor_insert_before_move_to_empty_map() {
+        let mut map = LinkedHashMap::new();
+        {
+            let mut cursor = map.tail_cursor_mut();
+            assert_eq!(cursor.insert_before_move_to("first", 1), None);
+            assert_eq!(cursor.current(), Some((&"first", &1)));
+            assert!(cursor.at_head());
+            assert!(cursor.at_tail());
+        }
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn test_cursor_insert_before_move_to_existing_key() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+
+        let mut cursor = map.tail_cursor_mut();
+        let old_value = cursor.insert_before_move_to("a", 10);
+
+        assert_eq!(old_value, Some(1));
+        assert_eq!(cursor.current(), Some((&"a", &10)));
+        assert_eq!(map.len(), 2);
+
+        let collected: Vec<_> = map.iter().map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(collected, vec![("a", 10), ("b", 2)]);
+    }
+
+    #[test]
+    fn test_cursor_insert_before_move_to_new_key() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+
+        let mut cursor = map.tail_cursor_mut();
+        assert_eq!(cursor.insert_before_move_to("c", 3), None);
+
+        assert_eq!(cursor.current(), Some((&"c", &3)));
+        assert_eq!(map.len(), 3);
+
+        let collected: Vec<_> = map.iter().map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(collected, vec![("a", 1), ("c", 3), ("b", 2)]);
+    }
+
+    #[test]
+    fn test_cursor_remove_prev() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+        map.insert("c", 3);
+
+        {
+            let mut cursor = map.tail_cursor_mut();
+            let (_ptr, removed) = cursor.remove_prev().unwrap();
+
+            assert_eq!(removed.key, "b");
+            assert_eq!(removed.value, 2);
+            assert_eq!(cursor.current(), Some((&"c", &3)));
+        }
+        assert_eq!(map.len(), 2);
+        let collected: Vec<_> = map.iter().map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(collected, vec![("a", 1), ("c", 3)]);
+    }
+
+    #[test]
+    fn test_cursor_remove_next() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+        map.insert("c", 3);
+
+        {
+            let mut cursor = map.head_cursor_mut();
+            let (_ptr, removed) = cursor.remove_next().unwrap();
+
+            assert_eq!(removed.key, "b");
+            assert_eq!(removed.value, 2);
+            assert_eq!(cursor.current(), Some((&"a", &1)));
+        }
+        assert_eq!(map.len(), 2);
+        let collected: Vec<_> = map.iter().map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(collected, vec![("a", 1), ("c", 3)]);
+    }
+
+    #[test]
+    fn test_cursor_remove_current() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+        map.insert("c", 3);
+
+        {
+            let cursor = map.key_cursor_mut(&"b");
+            let (_ptr, removed) = cursor.remove().unwrap();
+
+            assert_eq!(removed.key, "b");
+            assert_eq!(removed.value, 2);
+        }
+        assert_eq!(map.len(), 2);
+        let collected: Vec<_> = map.iter().map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(collected, vec![("a", 1), ("c", 3)]);
+    }
+
+    #[test]
+    fn test_cursor_remove_operations_empty_cases() {
+        let mut map = LinkedHashMap::new();
+        map.insert("only", 1);
+
+        let mut cursor = map.head_cursor_mut();
+        assert_ne!(cursor.remove_prev(), None);
+        assert!(cursor.remove_next().is_none());
+
+        let cursor = cursor.remove();
+        assert!(cursor.is_none());
+        assert_eq!(map.len(), 0);
+    }
+
+    #[test]
+    fn test_cursor_navigation_move_next_prev() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+        map.insert("c", 3);
+
+        let mut cursor = map.head_cursor_mut();
+        assert_eq!(cursor.current(), Some((&"a", &1)));
+        assert!(cursor.at_head());
+
+        cursor.move_next();
+        assert_eq!(cursor.current(), Some((&"b", &2)));
+        assert!(!cursor.at_head());
+        assert!(!cursor.at_tail());
+
+        cursor.move_next();
+        assert_eq!(cursor.current(), Some((&"c", &3)));
+        assert!(cursor.at_tail());
+
+        cursor.move_next();
+        assert_eq!(cursor.current(), Some((&"a", &1)));
+        assert!(cursor.at_head());
+
+        cursor.move_prev();
+        assert_eq!(cursor.current(), Some((&"c", &3)));
+        assert!(cursor.at_tail());
+
+        cursor.move_prev();
+        assert_eq!(cursor.current(), Some((&"b", &2)));
+        assert!(!cursor.at_head());
+        assert!(!cursor.at_tail());
+    }
+
+    #[test]
+    fn test_cursor_current_and_current_mut() {
+        let mut map = LinkedHashMap::new();
+        map.insert("test", 42);
+
+        let mut cursor = map.head_cursor_mut();
+        assert_eq!(cursor.current(), Some((&"test", &42)));
+
+        if let Some((key, value)) = cursor.current_mut() {
+            assert_eq!(key, &"test");
+            *value = 100;
+        }
+
+        assert_eq!(cursor.current(), Some((&"test", &100)));
+        assert_eq!(map.get(&"test"), Some(&100));
+    }
+
+    #[test]
+    fn test_cursor_next_and_next_mut() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+
+        let mut cursor = map.head_cursor_mut();
+        assert_eq!(cursor.next(), Some((&"b", &2)));
+
+        if let Some((key, value)) = cursor.next_mut() {
+            assert_eq!(key, &"b");
+            *value = 20;
+        }
+
+        assert_eq!(cursor.next(), Some((&"b", &20)));
+        assert_eq!(map.get(&"b"), Some(&20));
+    }
+
+    #[test]
+    fn test_cursor_prev_and_prev_mut() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+
+        let mut cursor = map.tail_cursor_mut();
+        assert_eq!(cursor.prev(), Some((&"a", &1)));
+
+        if let Some((key, value)) = cursor.prev_mut() {
+            assert_eq!(key, &"a");
+            *value = 10;
+        }
+
+        assert_eq!(cursor.prev(), Some((&"a", &10)));
+        assert_eq!(map.get(&"a"), Some(&10));
+    }
+
+    #[test]
+    fn test_cursor_ptr_operations() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+        map.insert("c", 3);
+
+        let current_ptr;
+        let next_ptr;
+        let prev_ptr;
+        {
+            let cursor = map.head_cursor_mut();
+            current_ptr = cursor.ptr().unwrap();
+            next_ptr = cursor.next_ptr().unwrap();
+            prev_ptr = cursor.prev_ptr().unwrap();
+
+            assert_eq!(cursor.get_ptr(&"b"), Some(next_ptr));
+            assert_eq!(cursor.get_ptr(&"nonexistent"), None);
+        }
+        assert_eq!(map.ptr_get(current_ptr), Some(&1));
+        assert_eq!(map.ptr_get(next_ptr), Some(&2));
+        assert_eq!(map.ptr_get(prev_ptr), Some(&3));
+    }
+
+    #[test]
+    fn test_cursor_at_head_tail_single_element() {
+        let mut map = LinkedHashMap::new();
+        map.insert("only", 1);
+
+        let cursor = map.head_cursor_mut();
+        assert!(cursor.at_head());
+        assert!(cursor.at_tail());
+        assert_eq!(cursor.current(), Some((&"only", &1)));
+    }
+
+    #[test]
+    fn test_cursor_iter_from_position() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+        map.insert("c", 3);
+        map.insert("d", 4);
+
+        let cursor = map.key_cursor_mut(&"b");
+        let collected: Vec<_> = cursor.iter().map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(collected, vec![("b", 2), ("c", 3), ("d", 4), ("a", 1)]);
+    }
+
+    #[test]
+    fn test_cursor_complex_insertion_sequence() {
+        let mut map = LinkedHashMap::new();
+
+        let mut cursor = map.head_cursor_mut();
+        cursor.insert_after_move_to("b", 2);
+        cursor.insert_before_move_to("a", 1);
+        cursor.insert_after_move_to("c", 3);
+
+        let collected: Vec<_> = map.iter().map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(collected, vec![("a", 1), ("c", 3), ("b", 2)]);
+    }
+
+    #[test]
+    fn test_cursor_mixed_operations() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+        map.insert("c", 3);
+        map.insert("d", 4);
+
+        {
+            let mut cursor = map.key_cursor_mut(&"b");
+
+            cursor.insert_after_move_to("e", 5);
+            assert_eq!(cursor.current(), Some((&"e", &5)));
+
+            cursor.remove_prev();
+
+            cursor.move_next();
+            let (_ptr, removed) = cursor.remove_next().unwrap();
+            assert_eq!(removed.key, "d");
+        }
+        assert_eq!(map.len(), 3);
+        let final_order: Vec<_> = map.iter().map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(final_order, vec![("a", 1), ("e", 5), ("c", 3)]);
+    }
+
+    #[test]
+    fn test_cursor_boundary_conditions() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+
+        let mut cursor = map.head_cursor_mut();
+
+        cursor.move_prev();
+        assert!(cursor.at_tail());
+        assert_eq!(cursor.current(), Some((&"b", &2)));
+
+        cursor.move_next();
+        assert!(cursor.at_head());
+        assert_eq!(cursor.current(), Some((&"a", &1)));
+
+        let tail_cursor = map.tail_cursor_mut();
+        assert!(tail_cursor.at_tail());
+        assert_eq!(tail_cursor.current(), Some((&"b", &2)));
+    }
+
+    #[test]
+    fn test_cursor_empty_map_operations() {
+        let mut map: LinkedHashMap<&str, i32> = LinkedHashMap::new();
+        let cursor = map.head_cursor_mut();
+
+        assert!(cursor.current().is_none());
+        assert!(cursor.next().is_none());
+        assert!(cursor.prev().is_none());
+        assert!(cursor.ptr().is_none());
+        assert!(cursor.next_ptr().is_none());
+        assert!(cursor.prev_ptr().is_none());
+        assert!(cursor.at_head());
+        assert!(cursor.at_tail());
+    }
+
+    #[test]
+    fn test_cursor_modification_during_iteration() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+        map.insert("c", 3);
+
+        let mut cursor = map.head_cursor_mut();
+
+        while let Some((key, value)) = cursor.current_mut() {
+            *value *= 10;
+            if *key == "b" {
+                cursor.insert_after_move_to("x", 99);
+                break;
+            }
+            cursor.move_next();
+        }
+
+        let final_state: Vec<_> = map.iter().map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(final_state, vec![("a", 10), ("b", 20), ("x", 99), ("c", 3)]);
+    }
+
+    #[test]
+    fn test_cursor_position_consistency_after_operations() {
+        let mut map = LinkedHashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+        map.insert("c", 3);
+
+        {
+            let mut cursor = map.key_cursor_mut(&"b");
+            let original_ptr = cursor.ptr().unwrap();
+
+            cursor.insert_after_move_to("d", 4);
+            let new_ptr = cursor.ptr().unwrap();
+            assert_ne!(original_ptr, new_ptr);
+            assert_eq!(cursor.current(), Some((&"d", &4)));
+
+            cursor.insert_before_move_to("e", 5);
+            assert_eq!(cursor.current(), Some((&"e", &5)));
+        }
+        let final_order: Vec<_> = map.iter().map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(
+            final_order,
+            vec![("a", 1), ("b", 2), ("e", 5), ("d", 4), ("c", 3)]
+        );
     }
 }

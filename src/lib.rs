@@ -5,6 +5,15 @@
 mod arena;
 pub mod linked_hash_map;
 
+use core::num::NonZeroU32;
+
+pub use linked_hash_map::CursorMut;
+pub use linked_hash_map::Entry;
+pub use linked_hash_map::IntoIter;
+pub use linked_hash_map::Iter;
+pub use linked_hash_map::OccupiedEntry;
+pub use linked_hash_map::VacantEntry;
+
 extern crate alloc;
 
 #[cfg(feature = "std")]
@@ -32,14 +41,6 @@ type RandomState = hashbrown::DefaultHashBuilder;
 /// assert_eq!(entries, [(&"a", &1), (&"b", &2)]);
 /// ```
 pub type LinkedHashMap<K, V> = crate::linked_hash_map::LinkedHashMap<K, V, RandomState>;
-use core::num::NonZeroU32;
-
-pub use linked_hash_map::CursorMut;
-pub use linked_hash_map::Entry;
-pub use linked_hash_map::IntoIter;
-pub use linked_hash_map::Iter;
-pub use linked_hash_map::OccupiedEntry;
-pub use linked_hash_map::VacantEntry;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 /// A pointer type used to identify entries in the linked hash map.
