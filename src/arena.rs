@@ -244,13 +244,14 @@ pub(crate) struct Arena<K, T> {
 
 impl<K, T> Drop for Arena<K, T> {
     fn drop(&mut self) {
-        // SAFETY: We have exclusive access to the arena, so we can safely drop
-        // all occupied slots.
+        // SAFETY: We mark each slot as vacant before dropping it, so we won't
+        // double-drop anything.
         unsafe {
             for slot_ptr in &mut self.slots {
                 let slot_ref = slot_ptr.as_mut();
                 match &slot_ref.links {
                     Links::Occupied { .. } => {
+                        slot_ref.links = Links::Vacant { next_free: None };
                         slot_ref.data.assume_init_drop();
                     }
                     Links::Vacant { .. } => {}
