@@ -44,7 +44,11 @@ impl<'m, K: Hash + Eq, T, S: BuildHasher> CursorMut<'m, K, T, S> {
     /// Inserts a key-value pair after the cursor's current position and
     /// moves the cursor to the inserted or updated entry.
     #[inline]
-    pub fn insert_after_move_to(&mut self, key: K, value: T) -> Option<T> {
+    pub fn insert_after_move_to(
+        &mut self,
+        key: K,
+        value: T,
+    ) -> Option<T> {
         let ptr = if self.ptr.is_none() {
             self.map.head_tail.as_ref().map(|ht| ht.tail)
         } else {
@@ -73,7 +77,11 @@ impl<'m, K: Hash + Eq, T, S: BuildHasher> CursorMut<'m, K, T, S> {
     /// Inserts a key-value pair before the cursor's current position and
     /// moves the cursor to the inserted or updated entry.
     #[inline]
-    pub fn insert_before_move_to(&mut self, key: K, value: T) -> Option<T> {
+    pub fn insert_before_move_to(
+        &mut self,
+        key: K,
+        value: T,
+    ) -> Option<T> {
         let ptr = if self.ptr.is_none() {
             self.map.head_tail.as_ref().map(|ht| ht.head)
         } else {
@@ -113,7 +121,10 @@ impl<'m, K: Hash + Eq, T, S: BuildHasher> CursorMut<'m, K, T, S> {
     /// * `Some(ptr)` if the key exists in the map
     /// * `None` if the key is not found
     #[inline]
-    pub fn get_ptr(&self, key: &K) -> Option<Ptr> {
+    pub fn get_ptr(
+        &self,
+        key: &K,
+    ) -> Option<Ptr> {
         self.map.get_ptr(key)
     }
 }

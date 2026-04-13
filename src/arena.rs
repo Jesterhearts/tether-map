@@ -23,14 +23,20 @@ pub(crate) struct ActiveSlotRef<K, T> {
 }
 
 impl<K, T> Debug for ActiveSlotRef<K, T> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut core::fmt::Formatter<'_>,
+    ) -> core::fmt::Result {
         write!(f, "ActiveSlotRef({:p})", self.slot)
     }
 }
 
 impl<K, T> ActiveSlotRef<K, T> {
     #[inline(always)]
-    pub(crate) fn data<'a>(&self, _arena: &'a Arena<K, T>) -> &'a NodeData<K, T> {
+    pub(crate) fn data<'a>(
+        &self,
+        _arena: &'a Arena<K, T>,
+    ) -> &'a NodeData<K, T> {
         #[cfg(debug_assertions)]
         {
             debug_assert_eq!(
@@ -45,7 +51,10 @@ impl<K, T> ActiveSlotRef<K, T> {
     }
 
     #[inline(always)]
-    pub(crate) fn data_mut<'a>(&mut self, _arena: &'a mut Arena<K, T>) -> &'a mut NodeData<K, T> {
+    pub(crate) fn data_mut<'a>(
+        &mut self,
+        _arena: &'a mut Arena<K, T>,
+    ) -> &'a mut NodeData<K, T> {
         #[cfg(debug_assertions)]
         {
             debug_assert_eq!(
@@ -62,7 +71,10 @@ impl<K, T> ActiveSlotRef<K, T> {
     }
 
     #[inline(always)]
-    pub(crate) fn this(&self, _arena: &Arena<K, T>) -> Ptr {
+    pub(crate) fn this(
+        &self,
+        _arena: &Arena<K, T>,
+    ) -> Ptr {
         #[cfg(debug_assertions)]
         {
             debug_assert_eq!(
@@ -76,7 +88,10 @@ impl<K, T> ActiveSlotRef<K, T> {
     }
 
     #[inline(always)]
-    pub(crate) fn next(&self, _arena: &Arena<K, T>) -> ActiveSlotRef<K, T> {
+    pub(crate) fn next(
+        &self,
+        _arena: &Arena<K, T>,
+    ) -> ActiveSlotRef<K, T> {
         #[cfg(debug_assertions)]
         {
             debug_assert_eq!(
@@ -118,7 +133,10 @@ impl<K, T> ActiveSlotRef<K, T> {
     }
 
     #[inline(always)]
-    pub(crate) fn prev(&self, _arena: &Arena<K, T>) -> ActiveSlotRef<K, T> {
+    pub(crate) fn prev(
+        &self,
+        _arena: &Arena<K, T>,
+    ) -> ActiveSlotRef<K, T> {
         #[cfg(debug_assertions)]
         {
             debug_assert_eq!(
@@ -174,7 +192,10 @@ impl<K, T> Clone for ActiveSlotRef<K, T> {
 impl<K, T> Copy for ActiveSlotRef<K, T> {}
 
 impl<K, T> PartialEq for ActiveSlotRef<K, T> {
-    fn eq(&self, other: &Self) -> bool {
+    fn eq(
+        &self,
+        other: &Self,
+    ) -> bool {
         self.slot == other.slot
     }
 }
@@ -197,7 +218,10 @@ pub(crate) enum Links<K, T> {
 }
 
 impl<K, T> Debug for Links<K, T> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut core::fmt::Formatter<'_>,
+    ) -> core::fmt::Result {
         match self {
             Links::Occupied { prev, next } => f
                 .debug_struct("Links::Occupied")
@@ -219,7 +243,10 @@ pub(crate) struct LLSlot<K, T> {
 }
 
 impl<K, T> Debug for LLSlot<K, T> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut core::fmt::Formatter<'_>,
+    ) -> core::fmt::Result {
         f.debug_struct("LLSlot")
             .field("this", &self.this)
             .field("links", &self.links)
@@ -285,7 +312,10 @@ impl<K, T> Arena<K, T> {
     }
 
     #[inline]
-    pub(crate) fn map_ptr(&self, ptr: Ptr) -> Option<ActiveSlotRef<K, T>> {
+    pub(crate) fn map_ptr(
+        &self,
+        ptr: Ptr,
+    ) -> Option<ActiveSlotRef<K, T>> {
         self.slots
             .get(ptr.unchecked_get())
             .filter(|slot| {
@@ -311,7 +341,10 @@ impl<K, T> Arena<K, T> {
     }
 
     #[inline]
-    pub(crate) fn is_occupied(&self, ptr: Ptr) -> bool {
+    pub(crate) fn is_occupied(
+        &self,
+        ptr: Ptr,
+    ) -> bool {
         self.slots.get(ptr.unchecked_get()).is_some_and(|slot| {
             // SAFETY: Slot was allocated from our own arena, so it's still valid.
             if unsafe { !matches!(slot.as_ref().links, Links::Occupied { .. }) } {
@@ -331,7 +364,11 @@ impl<K, T> Arena<K, T> {
     }
 
     #[inline]
-    pub(crate) fn alloc_circular(&mut self, key: K, value: T) -> ActiveSlotRef<K, T> {
+    pub(crate) fn alloc_circular(
+        &mut self,
+        key: K,
+        value: T,
+    ) -> ActiveSlotRef<K, T> {
         if let Some(mut free_slot) = self.free_list_head {
             // SAFETY: The free list only contains valid, uninitialized slots
             // that are not currently in use. We have exclusive
@@ -512,7 +549,10 @@ impl<K, T> Index<Ptr> for Arena<K, T> {
     type Output = NodeData<K, T>;
 
     #[inline]
-    fn index(&self, index: Ptr) -> &Self::Output {
+    fn index(
+        &self,
+        index: Ptr,
+    ) -> &Self::Output {
         self.map_ptr(index)
             .as_ref()
             .expect("Indexing with invalid or freed Ptr")
@@ -522,7 +562,10 @@ impl<K, T> Index<Ptr> for Arena<K, T> {
 
 impl<K, T> IndexMut<Ptr> for Arena<K, T> {
     #[inline]
-    fn index_mut(&mut self, index: Ptr) -> &mut Self::Output {
+    fn index_mut(
+        &mut self,
+        index: Ptr,
+    ) -> &mut Self::Output {
         self.map_ptr(index)
             .as_mut()
             .expect("Indexing with invalid or freed Ptr")

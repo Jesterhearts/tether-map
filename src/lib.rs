@@ -122,7 +122,10 @@ pub struct Ptr {
 }
 
 impl core::fmt::Debug for Ptr {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut core::fmt::Formatter<'_>,
+    ) -> core::fmt::Result {
         #[cfg(not(feature = "generational"))]
         {
             write!(f, "Ptr({})", self.inner.get() - 1)
